@@ -1,5 +1,8 @@
 # Version History
 
+## v1.5.5 - 2026-10-01
+  - change: explicitly set Created or Updated on an entity will be used. Currently it would always default to now
+
 ## v1.5.4 - 2026-04-18
   - change: desc -> descending renamed. Dropped desc
 

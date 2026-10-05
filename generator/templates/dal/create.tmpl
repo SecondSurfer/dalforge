@@ -36,8 +36,16 @@ func (d *{{$entityArgumentName}}Repository) create(ctx context.Context, entity *
 	start := time.Now()
 
 	now := time.Now().Truncate(time.Second)
-	entity.Created = now
-	entity.Updated = now
+	
+	// Only assign 'Created' if it hasn't been explicitly set by the domain layer
+	if entity.Created.IsZero() {
+		entity.Created = now
+	}
+	
+	// 'Updated' should typically mirror 'Created' on initial insert
+	if entity.Updated.IsZero() {
+		entity.Updated = entity.Created
+	}
 	
 	// Auto-generate UID fields if they are not provided
     {{- range $colName, $col := .Root.Columns }}

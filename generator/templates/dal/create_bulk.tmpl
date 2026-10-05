@@ -63,8 +63,13 @@ func (d *{{$entityArgumentName}}Repository) createBulk(ctx context.Context, enti
                 return nil, fmt.Errorf("entity with existing ID in bulk create")
             }
 
-            entity.Created = now
-            entity.Updated = now
+            // Preserve explicit timestamps or default to 'now'
+            if entity.Created.IsZero() {
+                entity.Created = now
+            }
+            if entity.Updated.IsZero() {
+                entity.Updated = entity.Created
+            }
 
 			// Auto-generate UID fields if they are not provided
 			{{- range $colName, $col := .Root.Columns }}
