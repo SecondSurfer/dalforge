@@ -83,6 +83,5 @@ caching:
   # - flush:  Actively clears local list caches and broadcasts a Pub/Sub invalidation to all peer pods on every write. Safest for strict consistency, but can cause cache stampedes on high-write entities.
   # - expire: Ignores writes and relies purely on 'listExpirationSeconds' (TTL). Ideal for high-write tables where eventual consistency is acceptable.
   # - epoch:  Bumps a global atomic timestamp on writes; list queries checking the cache with an older epoch are rejected. A balanced hybrid approach.
-  # - none:   Disables list cache invalidation entirely. *Mandatory* for entities utilizing 'bufferedCounters' (Write-Behind caching) to prevent background workers from constantly wiping the cache during asynchronous bulk syncs.
   listInvalidation: epoch       
   maxItemsCount: 100000         # max number of items in cache
