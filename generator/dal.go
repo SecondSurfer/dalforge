@@ -18,8 +18,9 @@ import (
 var templateFS embed.FS
 
 type Generator struct {
-	dalTemplate *template.Template
-	sqlTemplate *template.Template
+	dalContractTemplate *template.Template
+	dalImplTemplate     *template.Template
+	sqlTemplate         *template.Template
 }
 
 func NewGenerator() (*Generator, error) {
@@ -75,9 +76,14 @@ func NewGenerator() (*Generator, error) {
 		"pluckQueryWhere":              pluckQueryWhere,
 	}
 
-	dalTmpl, err := template.New("dal").Funcs(funcMap).ParseFS(templateFS, "templates/dal/*.tmpl")
+	dalContractTmpl, err := template.New("contract").Funcs(funcMap).ParseFS(templateFS, "templates/dal/*.tmpl")
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse DAL template: %w", err)
+		return nil, fmt.Errorf("failed to parse DAL contract template: %w", err)
+	}
+
+	dalImplTmpl, err := template.New("impl").Funcs(funcMap).ParseFS(templateFS, "templates/dal/*.tmpl")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DAL impl template: %w", err)
 	}
 
 	sqlTmpl, err := template.New("sql").Funcs(funcMap).ParseFS(templateFS, "templates/sql/*.tmpl")
@@ -86,34 +92,41 @@ func NewGenerator() (*Generator, error) {
 	}
 
 	return &Generator{
-		dalTemplate: dalTmpl,
-		sqlTemplate: sqlTmpl,
+		dalContractTemplate: dalContractTmpl,
+		dalImplTemplate:     dalImplTmpl,
+		sqlTemplate:         sqlTmpl,
 	}, nil
 }
 
-func (g *Generator) GenerateDAL(yamlInput string) (string, error) {
+// GenerateDAL parses entity YAML and returns separate contract Go code, implementation Go code, or error.
+func (g *Generator) GenerateDAL(yamlInput string) (contractCode string, implCode string, err error) {
 	config, err := g.parseYAML(yamlInput)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	config.TemplateVersion, err = getDirectoryHash(templateFS, ".")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	// This builds entity DAL .go file.
-	var buf strings.Builder
-	if err := g.dalTemplate.ExecuteTemplate(&buf, "base.tmpl", config); err != nil {
-		return "", fmt.Errorf("DAL generation failed: %w", err)
+	// 1. Generate Contract ({entity}.gen.go)
+	var contractBuf strings.Builder
+	if err := g.dalContractTemplate.ExecuteTemplate(&contractBuf, "contract.tmpl", config); err != nil {
+		return "", "", fmt.Errorf("DAL contract generation failed: %w", err)
 	}
-	return buf.String(), nil
+
+	// 2. Generate Implementation ({entity}_impl.gen.go)
+	var implBuf strings.Builder
+	if err := g.dalImplTemplate.ExecuteTemplate(&implBuf, "impl.tmpl", config); err != nil {
+		return "", "", fmt.Errorf("DAL implementation generation failed: %w", err)
+	}
+
+	return contractBuf.String(), implBuf.String(), nil
 }
 
-// Add this helper function in generator/dal.go
 func printScalabilityWarnings(config EntityConfig) {
 	checkOrClause := func(opType, opName, where string) {
-		// Look for " OR " with spaces to avoid matching words like "ORDER"
 		if strings.Contains(strings.ToUpper(where), " OR ") {
 			fmt.Printf("⚠️  SCALABILITY WARNING: %s operation '%s' in entity '%s' contains an 'OR' clause.\n", opType, opName, config.Name)
 			fmt.Printf("   -> MySQL struggles to optimize 'OR' conditions and may resort to Full Table Scans.\n")
@@ -145,15 +158,12 @@ func (g *Generator) parseYAML(yamlInput string) (EntityConfig, error) {
 		return EntityConfig{}, fmt.Errorf("entity name is required")
 	}
 
-	// Add default columns (id, created, updated are handled in templates)
-	// Validate user columns don't conflict with defaults
 	for colName := range config.Columns {
 		if colName == "id" || colName == "created" || colName == "updated" {
 			return EntityConfig{}, fmt.Errorf("column name '%s' is reserved", colName)
 		}
 	}
 
-	// Set default value for list invalidation
 	if config.Caching.ListInvalidation == "" {
 		config.Caching.ListInvalidation = "flush"
 	}
@@ -170,25 +180,21 @@ func (g *Generator) parseYAML(yamlInput string) (EntityConfig, error) {
 func getDirectoryHash(efs embed.FS, inputDir string) (string, error) {
 	hash := sha256.New()
 
-	// Use fs.WalkDir from the "io/fs" package to traverse the embedded FS.
 	err := fs.WalkDir(efs, inputDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip directories
 		if d.IsDir() {
 			return nil
 		}
 
-		// Open the file from the embedded FS
 		file, err := efs.Open(path)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
 
-		// Copy the file contents into the hash
 		if _, err := io.Copy(hash, file); err != nil {
 			return err
 		}
@@ -200,7 +206,6 @@ func getDirectoryHash(efs embed.FS, inputDir string) (string, error) {
 		return "", fmt.Errorf("failed to compute directory hash: %w", err)
 	}
 
-	// Finalize the hash and return it as a hex string
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
@@ -231,10 +236,9 @@ type Column struct {
 	Type      string `yaml:"type"`
 	AllowNull bool   `yaml:"allowNull"`
 	Unique    bool   `yaml:"unique"`
-	Prefix    string `yaml:"prefix"` //
+	Prefix    string `yaml:"prefix"`
 }
 
-// UpdateBulkConfig defines a bulk partial update operation
 type UpdateBulkConfig struct {
 	Name    string   `yaml:"name"`
 	Set     []string `yaml:"set"`
@@ -250,18 +254,17 @@ type PluckConfig struct {
 
 type OperationConfig struct {
 	Gets        []string           `yaml:"gets"`
-	GetsBulk    []string           `yaml:"getsBulk"` // <-- NEW: For batch gets via IN clause
+	GetsBulk    []string           `yaml:"getsBulk"`
 	Lists       []ListConfig       `yaml:"lists"`
 	ListsBulk   []ListBulkConfig   `yaml:"listsBulk"`
 	Deletes     []DeleteConfig     `yaml:"deletes"`
-	UpdatesBulk []UpdateBulkConfig `yaml:"updatesBulk"` // <-- NEW: For bulk partial updates
+	UpdatesBulk []UpdateBulkConfig `yaml:"updatesBulk"`
 	Plucks      []PluckConfig      `yaml:"plucks"`
 	Write       bool               `yaml:"write"`
 	Delete      bool               `yaml:"delete"`
 	SoftDelete  bool               `yaml:"softDelete"`
 }
 
-// DeleteConfig mirrors ListConfig but is tailored for bulk deletion operations
 type DeleteConfig struct {
 	Name        string            `yaml:"name"`
 	Where       string            `yaml:"where"`
@@ -276,7 +279,6 @@ type ListConfig struct {
 	TypeMapping map[string]string `yaml:"typeMapping"`
 }
 
-// Add this new struct definition to generator/dal.go
 type ListBulkConfig struct {
 	Name        string            `yaml:"name"`
 	Where       string            `yaml:"where"`

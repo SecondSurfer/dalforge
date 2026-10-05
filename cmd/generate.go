@@ -14,9 +14,10 @@ import (
 // generateCmd represents the 'generate' command.
 var generateCmd = &cobra.Command{
 	Use:   "generate [input-directory] [output-directory]",
-	Short: "Generate .go and .sql files from YAML definitions",
+	Short: "Generate .gen.go, _impl.gen.go, and .sql files from YAML definitions",
 	Long: `This command scans the specified input directory for YAML (.yaml) files,
-then generates the corresponding .go and .sql destination file paths. If no input directory is provided, the current directory is used.
+then generates the corresponding contract (.gen.go), implementation (_impl.gen.go), and .sql destination file paths. 
+If no input directory is provided, the current directory is used.
 If no output directory is provided, it defaults to the same directory as input.`,
 	Args: cobra.RangeArgs(0, 2),
 	Run:  generate,
@@ -70,7 +71,8 @@ func generate(cmd *cobra.Command, args []string) {
 			}
 
 			inputFile := filepath.Join(inputDir, entry.Name())
-			goPath := filepath.Join(outputDir, baseName+".gen.go")
+			contractGoPath := filepath.Join(outputDir, baseName+".gen.go")
+			implGoPath := filepath.Join(outputDir, baseName+"_impl.gen.go")
 			sqlPath := filepath.Join(outputDir, baseName+".sql")
 
 			data, err := os.ReadFile(inputFile)
@@ -80,10 +82,10 @@ func generate(cmd *cobra.Command, args []string) {
 
 			yamlContent := string(data)
 
-			// Generate DAL Go file
-			dalFile, err := gen.GenerateDAL(yamlContent)
+			// Generate both Go outputs (Contract & Implementation)
+			contractFile, implFile, err := gen.GenerateDAL(yamlContent)
 			if err != nil {
-				log.Fatalf("failed GenerateDAL on file %s, %v", inputFile, err)
+				log.Fatalf("Failed GenerateDAL on file %s, %v", inputFile, err)
 			}
 
 			err = os.MkdirAll(outputDir, 0755)
@@ -91,11 +93,19 @@ func generate(cmd *cobra.Command, args []string) {
 				log.Fatalf("failed creating directory %s, %v", outputDir, err)
 			}
 
-			err = os.WriteFile(goPath, []byte(dalFile), 0644)
+			// Write Contract (.gen.go)
+			err = os.WriteFile(contractGoPath, []byte(contractFile), 0644)
 			if err != nil {
-				log.Fatalf("failed writing DAL content to file %s, %v", goPath, err)
+				log.Fatalf("failed writing DAL contract content to file %s, %v", contractGoPath, err)
 			}
-			fmt.Printf("Generated DAL: %s\n", goPath)
+			fmt.Printf("Generated Contract:       %s\n", contractGoPath)
+
+			// Write Implementation (_impl.gen.go)
+			err = os.WriteFile(implGoPath, []byte(implFile), 0644)
+			if err != nil {
+				log.Fatalf("failed writing DAL impl content to file %s, %v", implGoPath, err)
+			}
+			fmt.Printf("Generated Implementation: %s\n", implGoPath)
 
 			// Generate SQL file
 			sqlFile, err := gen.GenerateSQL(yamlContent)
@@ -107,8 +117,8 @@ func generate(cmd *cobra.Command, args []string) {
 			if err != nil {
 				log.Fatalf("failed writing SQL content to file %s, %v", sqlPath, err)
 			}
+			fmt.Printf("Generated SQL:            %s\n", sqlPath)
 
-			fmt.Printf("Generated SQL: %s\n", sqlPath)
 			hadDalFile = true
 		}
 	}
