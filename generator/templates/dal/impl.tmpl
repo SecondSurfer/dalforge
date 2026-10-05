@@ -185,3 +185,18 @@ func (d *{{$entityArgumentName}}Repository) getCacheKey(id int64) string {
 {{- end }}
 
 {{template "delete_custom" .}}
+
+{{- if .BufferedCounters }}
+	{{- range .BufferedCounters }}
+// {{pascalCase .Name}} executes an O(1) in-memory increment to be flushed later.
+func (d *{{$entityArgumentName}}Repository) {{pascalCase .Name}}(ctx context.Context, {{camelCase .GroupBy}} string, delta int) error {
+	bufferKey := "purplehoney:{{$entityTableName}}:{{.Column}}:buffer"
+	
+	if err := d.cacheProvider.HIncrBy(ctx, bufferKey, {{camelCase .GroupBy}}, int64(delta)); err != nil {
+		d.telemetryProvider.IncDBError("{{$entityTableName}}", "increment_{{.Column}}_buffer")
+		return err
+	}
+	return nil
+}
+	{{- end }}
+{{- end }}

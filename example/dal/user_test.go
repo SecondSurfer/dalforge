@@ -33,8 +33,12 @@ type TestDBProvider struct {
 }
 
 func (p *TestDBProvider) GetDatabase(_ string, _ bool) (*sql.DB, error) {
+	if p.connection == nil {
+		return nil, fmt.Errorf("database is disconnected")
+	}
 	return p.connection, nil
 }
+
 func (p *TestDBProvider) AllDatabases(_ string, _ string) []*sql.DB {
 	return nil
 }

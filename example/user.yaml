@@ -73,7 +73,16 @@ circuitbreaker:
   consecutiveFailures: 4         # how many times to fail in an closed state before we swithc to open state
 caching:
   type: memory # Currently supported is memory + pub/sub redis
-  singleExpirationSeconds: 300  # timeout for local cache for single rows
+  # singleExpirationSeconds controls the TTL (Time-To-Live) for individual row caches (L1 local memory).
+  # - Caching Mechanism: Point-reads (e.g., GetByID, GetByMatchUid) store the pure Go struct in local memory. Subsequent reads return in ~O(1) time without hitting MySQL.
+  # - Passive Eviction: The item is automatically purged from memory when this TTL expires, or if the cache reaches the capacity defined by 'maxItemsCount'.
+  # - Active Invalidation: Any 'Update' or 'Delete' operation immediately removes the entity from the local pod's cache AND fires an asynchronous Redis Pub/Sub event. This broadcasts the exact cache key to all peer pods, instantly invalidating their local copies to prevent stale data.
+  singleExpirationSeconds: 300  
   listExpirationSeconds: 60     # timeout for local cache for multiple rows aka list functions
-  listInvalidation: epoch       # potential values could be: expire, flush, epoch
+  # listInvalidation controls how paginated lists and count queries are invalidated during writes:
+  # - flush:  Actively clears local list caches and broadcasts a Pub/Sub invalidation to all peer pods on every write. Safest for strict consistency, but can cause cache stampedes on high-write entities.
+  # - expire: Ignores writes and relies purely on 'listExpirationSeconds' (TTL). Ideal for high-write tables where eventual consistency is acceptable.
+  # - epoch:  Bumps a global atomic timestamp on writes; list queries checking the cache with an older epoch are rejected. A balanced hybrid approach.
+  # - none:   Disables list cache invalidation entirely. *Mandatory* for entities utilizing 'bufferedCounters' (Write-Behind caching) to prevent background workers from constantly wiping the cache during asynchronous bulk syncs.
+  listInvalidation: epoch       
   maxItemsCount: 100000         # max number of items in cache

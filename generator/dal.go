@@ -20,6 +20,7 @@ var templateFS embed.FS
 type Generator struct {
 	dalContractTemplate *template.Template
 	dalImplTemplate     *template.Template
+	dalFlusherTemplate  *template.Template
 	sqlTemplate         *template.Template
 }
 
@@ -86,6 +87,12 @@ func NewGenerator() (*Generator, error) {
 		return nil, fmt.Errorf("failed to parse DAL impl template: %w", err)
 	}
 
+	// NEW: Flusher template
+	dalFlusherTmpl, err := template.New("flusher").Funcs(funcMap).ParseFS(templateFS, "templates/dal/*.tmpl")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DAL flusher template: %w", err)
+	}
+
 	sqlTmpl, err := template.New("sql").Funcs(funcMap).ParseFS(templateFS, "templates/sql/*.tmpl")
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse SQL template: %w", err)
@@ -94,35 +101,43 @@ func NewGenerator() (*Generator, error) {
 	return &Generator{
 		dalContractTemplate: dalContractTmpl,
 		dalImplTemplate:     dalImplTmpl,
+		dalFlusherTemplate:  dalFlusherTmpl,
 		sqlTemplate:         sqlTmpl,
 	}, nil
 }
 
 // GenerateDAL parses entity YAML and returns separate contract Go code, implementation Go code, or error.
-func (g *Generator) GenerateDAL(yamlInput string) (contractCode string, implCode string, err error) {
+func (g *Generator) GenerateDAL(yamlInput string) (contractCode string, implCode string, flusherCode string, err error) {
 	config, err := g.parseYAML(yamlInput)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	config.TemplateVersion, err = getDirectoryHash(templateFS, ".")
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
-	// 1. Generate Contract ({entity}.gen.go)
 	var contractBuf strings.Builder
 	if err := g.dalContractTemplate.ExecuteTemplate(&contractBuf, "contract.tmpl", config); err != nil {
-		return "", "", fmt.Errorf("DAL contract generation failed: %w", err)
+		return "", "", "", fmt.Errorf("DAL contract generation failed: %w", err)
 	}
 
-	// 2. Generate Implementation ({entity}_impl.gen.go)
 	var implBuf strings.Builder
 	if err := g.dalImplTemplate.ExecuteTemplate(&implBuf, "impl.tmpl", config); err != nil {
-		return "", "", fmt.Errorf("DAL implementation generation failed: %w", err)
+		return "", "", "", fmt.Errorf("DAL implementation generation failed: %w", err)
 	}
 
-	return contractBuf.String(), implBuf.String(), nil
+	// 3. Generate Flusher Worker only if bufferedCounters exist
+	if len(config.BufferedCounters) > 0 {
+		var flusherBuf strings.Builder
+		if err := g.dalFlusherTemplate.ExecuteTemplate(&flusherBuf, "flusher.tmpl", config); err != nil {
+			return "", "", "", fmt.Errorf("DAL flusher generation failed: %w", err)
+		}
+		flusherCode = flusherBuf.String()
+	}
+
+	return contractBuf.String(), implBuf.String(), flusherCode, nil
 }
 
 func printScalabilityWarnings(config EntityConfig) {
@@ -210,13 +225,14 @@ func getDirectoryHash(efs embed.FS, inputDir string) (string, error) {
 }
 
 type EntityConfig struct {
-	TemplateVersion string               // This item is not loaded from yaml but is calculated at runtime
-	Name            string               `yaml:"name"`
-	Version         string               `yaml:"version"`
-	Columns         map[string]Column    `yaml:"columns"`
-	Operations      OperationConfig      `yaml:"operations"`
-	Caching         CachingConfig        `yaml:"caching"`
-	CircuitBreaker  CircuitBreakerConfig `yaml:"circuitbreaker"`
+	TemplateVersion  string                  // This item is not loaded from yaml but is calculated at runtime
+	Name             string                  `yaml:"name"`
+	Version          string                  `yaml:"version"`
+	Columns          map[string]Column       `yaml:"columns"`
+	Operations       OperationConfig         `yaml:"operations"`
+	Caching          CachingConfig           `yaml:"caching"`
+	CircuitBreaker   CircuitBreakerConfig    `yaml:"circuitbreaker"`
+	BufferedCounters []BufferedCounterConfig `yaml:"bufferedCounters"`
 }
 
 type CachingConfig struct {
@@ -292,4 +308,11 @@ type ListBulkConfig struct {
 	Where       string            `yaml:"where"`
 	WhereIn     string            `yaml:"whereIn"`
 	TypeMapping map[string]string `yaml:"typeMapping"`
+}
+
+type BufferedCounterConfig struct {
+	Name                 string `yaml:"name"`
+	Column               string `yaml:"column"`
+	GroupBy              string `yaml:"groupBy"`
+	FlushIntervalSeconds int    `yaml:"flushIntervalSeconds"`
 }

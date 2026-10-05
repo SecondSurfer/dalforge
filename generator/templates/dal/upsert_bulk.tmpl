@@ -53,6 +53,11 @@ func (d *{{$entityArgumentName}}Repository) {{camelCase $upd.Name}}(ctx context.
 		d.telemetryProvider.IncDBError("{{$entityTableName}}", operation)
 		return 0, dbErr
 	}
+    
+    if db == nil {
+		d.telemetryProvider.IncDBError("{{$entityTableName}}", operation)
+		return 0, errors.New("database connection is nil")
+	}
 
 	var totalRowsAffected int64
 	batchSize := 500

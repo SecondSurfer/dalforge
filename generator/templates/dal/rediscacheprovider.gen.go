@@ -380,3 +380,25 @@ func (p *RedisCacheProvider) listenForBumpEpoch(entityName string) {
 		}
 	}
 }
+
+// --- Buffer Operations for Write-Behind Cache ---
+
+func (p *RedisCacheProvider) HIncrBy(ctx context.Context, key, field string, incr int64) error {
+	return p.client.HIncrBy(ctx, key, field, incr).Err()
+}
+
+func (p *RedisCacheProvider) HScan(ctx context.Context, key string, cursor uint64, match string, count int64) ([]string, uint64, error) {
+	return p.client.HScan(ctx, key, cursor, match, count).Result()
+}
+
+func (p *RedisCacheProvider) Rename(ctx context.Context, oldKey, newKey string) error {
+	return p.client.Rename(ctx, oldKey, newKey).Err()
+}
+
+func (p *RedisCacheProvider) Del(ctx context.Context, keys ...string) error {
+	return p.client.Del(ctx, keys...).Err()
+}
+
+func (p *RedisCacheProvider) SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) (bool, error) {
+	return p.client.SetNX(ctx, key, value, expiration).Result()
+}

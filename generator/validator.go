@@ -29,6 +29,8 @@ func ValidateEntityConfig(entity EntityConfig) error {
 	// Validate circuitbreaker config.
 	errs = append(errs, validateCircuitBreakerConfig(entity.CircuitBreaker)...)
 
+	errs = append(errs, validateBufferedCounters(entity.BufferedCounters, entity.Operations.UpsertsBulk, entity.Columns, entity.Caching)...)
+
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "\n"))
 	}
@@ -474,5 +476,60 @@ func validateUpsertsBulk(upserts []UpsertBulkConfig, columns map[string]Column) 
 			}
 		}
 	}
+	return errs
+}
+
+func validateBufferedCounters(counters []BufferedCounterConfig, upserts []UpsertBulkConfig, columns map[string]Column, caching CachingConfig) []string {
+	var errs []string
+
+	for _, bc := range counters {
+		if len(bc.Name) <= 4 {
+			errs = append(errs, fmt.Sprintf("bufferedCounter name '%s' must be longer than 4 characters", bc.Name))
+		}
+		if !isSnakeCase(bc.Name) {
+			errs = append(errs, fmt.Sprintf("bufferedCounter name '%s' must be in snake_case", bc.Name))
+		}
+
+		if col, exists := columns[bc.Column]; !exists {
+			errs = append(errs, fmt.Sprintf("bufferedCounter '%s' refers to unknown column '%s'", bc.Name, bc.Column))
+		} else if col.Type != "int32" && col.Type != "int64" && col.Type != "int8" {
+			errs = append(errs, fmt.Sprintf("bufferedCounter '%s' column '%s' must be a numeric type (int8/int32/int64) for atomic increments", bc.Name, bc.Column))
+		}
+
+		if _, exists := columns[bc.GroupBy]; !exists && bc.GroupBy != "id" {
+			errs = append(errs, fmt.Sprintf("bufferedCounter '%s' refers to unknown groupBy column '%s'", bc.Name, bc.GroupBy))
+		}
+
+		if bc.FlushIntervalSeconds < 10 {
+			errs = append(errs, fmt.Sprintf("bufferedCounter '%s' flushIntervalSeconds must be at least 10 seconds to prevent Redis CPU spikes", bc.Name))
+		}
+
+		// Architectural guardrail: Buffers update MySQL outside of standard CRUD flows.
+		// Global list caches would become stale if not set to 'expire' or 'none'.
+		if caching.ListInvalidation == "flush" || caching.ListInvalidation == "epoch" {
+			errs = append(errs, fmt.Sprintf("bufferedCounter '%s' requires entity listInvalidation to be 'expire' or 'none', currently '%s'. Asynchronous background flushes cannot safely invalidate global epochs without causing cache stampedes.", bc.Name, caching.ListInvalidation))
+		}
+
+		// 🚀 NEW: Ensure a matching upsertsBulk operation exists to actually persist the buffer
+		hasMatchingUpsert := false
+		for _, u := range upserts {
+			if u.Increment {
+				for _, updCol := range u.UpdateColumns {
+					if updCol == bc.Column {
+						hasMatchingUpsert = true
+						break
+					}
+				}
+			}
+			if hasMatchingUpsert {
+				break
+			}
+		}
+
+		if !hasMatchingUpsert {
+			errs = append(errs, fmt.Sprintf("bufferedCounter '%s' targeting column '%s' requires a corresponding 'upsertsBulk' operation with 'increment: true' and '%s' in 'updateColumns'", bc.Name, bc.Column, bc.Column))
+		}
+	}
+
 	return errs
 }

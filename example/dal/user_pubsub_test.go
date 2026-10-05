@@ -20,6 +20,31 @@ type FakeCacheProvider struct {
 	bumpEpochCallbacks    map[string]func()
 }
 
+// Del implements [CacheProvider].
+func (f *FakeCacheProvider) Del(ctx context.Context, keys ...string) error {
+	panic("unimplemented")
+}
+
+// HIncrBy implements [CacheProvider].
+func (f *FakeCacheProvider) HIncrBy(ctx context.Context, key string, field string, incr int64) error {
+	panic("unimplemented")
+}
+
+// HScan implements [CacheProvider].
+func (f *FakeCacheProvider) HScan(ctx context.Context, key string, cursor uint64, match string, count int64) ([]string, uint64, error) {
+	panic("unimplemented")
+}
+
+// Rename implements [CacheProvider].
+func (f *FakeCacheProvider) Rename(ctx context.Context, oldKey string, newKey string) error {
+	panic("unimplemented")
+}
+
+// SetNX implements [CacheProvider].
+func (f *FakeCacheProvider) SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) (bool, error) {
+	panic("unimplemented")
+}
+
 func NewFakeCacheProvider() *FakeCacheProvider {
 	return &FakeCacheProvider{
 		invalidationCallbacks: make(map[string]func(string)),

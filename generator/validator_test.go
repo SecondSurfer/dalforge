@@ -15,6 +15,7 @@ func TestValidateEntityConfig_Valid(t *testing.T) {
 			"email":       {Type: "varchar", AllowNull: false, Unique: true},
 			"preferences": {Type: "json", AllowNull: true, Unique: false},
 			"status":      {Type: "varchar", AllowNull: false, Unique: false},
+			"score":       {Type: "int32", AllowNull: false, Unique: false}, // Valid column for buffer
 			"created":     {Type: "datetime", AllowNull: false, Unique: false},
 			"updated":     {Type: "datetime", AllowNull: false, Unique: false},
 		},
@@ -45,13 +46,10 @@ func TestValidateEntityConfig_Valid(t *testing.T) {
 			Delete: true,
 			ListsBulk: []ListBulkConfig{
 				{
-					// Changed from by_public_ids to by_statuses
-					Name: "by_statuses",
-					// Changed from public_id (unique) to status (non-unique)
+					Name:    "by_statuses",
 					WhereIn: "status",
 				},
 			},
-			// 🚀 NEW: Added valid plucks
 			Plucks: []PluckConfig{
 				{
 					Name:   "pluck_emails_by_status",
@@ -60,12 +58,28 @@ func TestValidateEntityConfig_Valid(t *testing.T) {
 				},
 				{
 					Name:   "pluck_ids_by_creation",
-					Column: "id", // Targeting a default column
+					Column: "id",
 					Where:  "created > :cutoff",
 					TypeMapping: map[string]string{
-						"cutoff": "created", // Valid mapping to a default column
+						"cutoff": "created",
 					},
 				},
+			},
+			UpsertsBulk: []UpsertBulkConfig{
+				{
+					Name:           "upsert_user_scores",
+					ConflictTarget: "public_id",
+					UpdateColumns:  []string{"score"},
+					Increment:      true,
+				},
+			},
+		},
+		BufferedCounters: []BufferedCounterConfig{
+			{
+				Name:                 "increment_score",
+				Column:               "score",
+				GroupBy:              "public_id",
+				FlushIntervalSeconds: 300,
 			},
 		},
 		CircuitBreaker: CircuitBreakerConfig{
@@ -76,7 +90,7 @@ func TestValidateEntityConfig_Valid(t *testing.T) {
 			Type:                    "memory",
 			SingleExpirationSeconds: 60,
 			ListExpirationSeconds:   60,
-			ListInvalidation:        "flush",
+			ListInvalidation:        "expire", // FIX: Reverted to 'expire' to pass existing validator logic
 			MaxItemsCount:           20,
 		},
 	}
@@ -99,6 +113,7 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 			"legacy_uuid":    {Type: "uuid", AllowNull: false, Unique: false},                      // error: uuid is no longer supported
 			"missing_prefix": {Type: "uid", Prefix: "", AllowNull: false, Unique: true},            // error: uid requires a prefix when unique
 			"bad_prefix":     {Type: "uid", Prefix: "User Prefix", AllowNull: false, Unique: true}, // error: prefix must be snake_case when unique
+			"score":          {Type: "int32", AllowNull: false, Unique: false},
 		},
 		Operations: OperationConfig{
 			Gets: []string{"id", "email", "non_existent"}, // non_existent: error; email: error due to not unique.
@@ -161,7 +176,6 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 					WhereIn: "id", // id is unique but we also define a custom unique below
 				},
 			},
-			// 🚀 NEW: Added invalid plucks
 			Plucks: []PluckConfig{
 				{
 					Name:   "duplicate_name", // <-- Collision!
@@ -189,6 +203,29 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 					},
 				},
 			},
+			UpsertsBulk: []UpsertBulkConfig{
+				{
+					Name:           "upsert invalid", // error: spaces, not snake_case
+					ConflictTarget: "ghost_column",   // error: doesn't exist
+					UpdateColumns:  []string{"id"},   // error: cannot update immutable column
+					Increment:      true,
+				},
+			},
+		},
+		BufferedCounters: []BufferedCounterConfig{
+			{
+				Name:                 "inc",          // error: too short
+				Column:               "email",        // error: must be numeric
+				GroupBy:              "ghost_column", // error: doesn't exist
+				FlushIntervalSeconds: 5,              // error: must be >= 10
+			},
+			{
+				Name:                 "missing_upsert",
+				Column:               "score",
+				GroupBy:              "id",
+				FlushIntervalSeconds: 300,
+				// error: targeting 'score', but no upsertsBulk operation exists with Increment: true for 'score'
+			},
 		},
 		CircuitBreaker: CircuitBreakerConfig{
 			TimeoutSeconds:      0,
@@ -198,7 +235,7 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 			Type:                    "redis",
 			SingleExpirationSeconds: 1,
 			ListExpirationSeconds:   120,     // <-- Set to > 60
-			ListInvalidation:        "epoch", // <-- Set to 'expire' to trigger the check
+			ListInvalidation:        "epoch", // error: must be 'expire' or 'none' when using BufferedCounters
 			MaxItemsCount:           5,
 		},
 	}
@@ -242,6 +279,15 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 		"listsBulk 'list_by_public_ids' uses whereIn on 'id' which is unique. Use 'getsBulk' instead.",
 		"listsBulk 'list_by_unique_column' uses whereIn on 'id' which is unique. Use 'getsBulk' instead.",
 		"when listInvalidation is 'epoch', listExpirationSeconds must be 60 or less",
+		"upsertsBulk name 'upsert invalid' must be in snake_case",
+		"upsertsBulk 'upsert invalid' refers to unknown conflictTarget column 'ghost_column'",
+		"upsertsBulk 'upsert invalid' cannot update immutable column 'id'",
+		"bufferedCounter name 'inc' must be longer than 4 characters",
+		"bufferedCounter 'inc' column 'email' must be a numeric type (int8/int32/int64) for atomic increments",
+		"bufferedCounter 'inc' refers to unknown groupBy column 'ghost_column'",
+		"bufferedCounter 'inc' flushIntervalSeconds must be at least 10 seconds to prevent Redis CPU spikes",
+		"bufferedCounter 'inc' requires entity listInvalidation to be 'expire' or 'none', currently 'epoch'",
+		"bufferedCounter 'missing_upsert' targeting column 'score' requires a corresponding 'upsertsBulk' operation with 'increment: true' and 'score' in 'updateColumns'",
 	}
 
 	for _, expectedError := range expectedErrors {

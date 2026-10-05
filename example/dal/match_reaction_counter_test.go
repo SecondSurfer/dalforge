@@ -2,11 +2,15 @@ package dal
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sony/gobreaker"
 	"github.com/stretchr/testify/assert"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 func TestMatchReactionCounterUpsertBulk(t *testing.T) {
@@ -94,5 +98,147 @@ func TestMatchReactionCounterUpsertBulk(t *testing.T) {
 		// Verify immutable timestamps were respected
 		assert.Equal(t, record1.Created.Unix(), updated1.Created.Unix(), "Created timestamp should remain immutable")
 		assert.GreaterOrEqual(t, updated1.Updated.Unix(), record1.Updated.Unix(), "Updated timestamp should advance")
+	})
+}
+
+func TestMatchReactionCounter_BufferAndFlush(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Spin up an isolated Redis container for testing the buffer
+	req := testcontainers.ContainerRequest{
+		Image:        "redis:7-alpine",
+		ExposedPorts: []string{"6379/tcp"},
+		WaitingFor:   wait.ForListeningPort("6379/tcp"),
+	}
+	redisC, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	assert.NoError(t, err)
+	defer redisC.Terminate(ctx)
+
+	host, _ := redisC.Host(ctx)
+	port, _ := redisC.MappedPort(ctx, "6379")
+	redisAddr := fmt.Sprintf("%s:%s", host, port.Port())
+
+	redisProvider := NewRedisCacheProvider(redisAddr, "", 0, PrometheusTelemetryProvider{})
+	err = redisProvider.Connect()
+	assert.NoError(t, err)
+	defer redisProvider.Close()
+
+	// 2. Setup MySQL
+	setupTestDB(t)
+	defer teardownTestDB(t)
+
+	// Instantiate the repository with the real Redis provider
+	reactionDAL := NewMatchReactionCounterRepository(
+		dbProvider,
+		redisProvider,
+		nil,
+		gobreaker.Settings{},
+		PrometheusTelemetryProvider{},
+	)
+
+	// Instantiate the background worker
+	flusher := NewIncrementReactionFlusher(reactionDAL, redisProvider, PrometheusTelemetryProvider{})
+
+	t.Run("Success_BufferAndFlush", func(t *testing.T) {
+		// Service Layer: User sends multiple winks rapidly over time
+		err := reactionDAL.IncrementReaction(ctx, "match_gamma", 1)
+		assert.NoError(t, err)
+		err = reactionDAL.IncrementReaction(ctx, "match_gamma", 1)
+		assert.NoError(t, err)
+		err = reactionDAL.IncrementReaction(ctx, "match_delta", 5) // Sent 5 winks
+		assert.NoError(t, err)
+
+		// Background Worker: Timer fires, triggering the flush
+		flusher.flush(ctx)
+
+		// Verify MySQL has successfully absorbed the aggregated values
+		recordGamma, err := reactionDAL.GetByMatchUid(ctx, "match_gamma")
+		assert.NoError(t, err)
+		assert.Equal(t, int32(2), recordGamma.ReactionCount)
+
+		recordDelta, err := reactionDAL.GetByMatchUid(ctx, "match_delta")
+		assert.NoError(t, err)
+		assert.Equal(t, int32(5), recordDelta.ReactionCount)
+	})
+
+	t.Run("EdgeCase_ConcurrentFlushLock", func(t *testing.T) {
+		// Add a new wink to the buffer
+		err := reactionDAL.IncrementReaction(ctx, "match_gamma", 1)
+		assert.NoError(t, err)
+
+		// Edge Case: Simulate another horizontal pod currently executing the flush (Lock is held)
+		lockKey := "purplehoney:match_reaction_counter:reaction_count:flush_lock"
+		acquired, err := redisProvider.SetNX(ctx, lockKey, "locked", 2*time.Minute)
+		assert.NoError(t, err)
+		assert.True(t, acquired)
+
+		// Trigger the background flush - should abort silently because lock is held
+		flusher.flush(ctx)
+
+		// Verify MySQL was NOT updated (should still be 2 from the previous subtest)
+		recordGamma, err := reactionDAL.GetByMatchUid(ctx, "match_gamma")
+		assert.NoError(t, err)
+		assert.Equal(t, int32(2), recordGamma.ReactionCount)
+
+		// Release the lock manually to simulate the other pod finishing
+		redisProvider.Del(ctx, lockKey)
+
+		// Flush again - should now succeed
+		flusher.flush(ctx)
+		recordGamma, err = reactionDAL.GetByMatchUid(ctx, "match_gamma")
+		assert.NoError(t, err)
+		assert.Equal(t, int32(3), recordGamma.ReactionCount) // 2 (initial) + 1 (new delta)
+	})
+
+	t.Run("EdgeCase_EmptyBuffer", func(t *testing.T) {
+		// Trigger flush with absolutely nothing in the Redis buffer.
+		// It should exit gracefully without panicking or passing empty arrays to MySQL.
+		flusher.flush(ctx)
+
+		// Verify state remains untouched
+		recordGamma, err := reactionDAL.GetByMatchUid(ctx, "match_gamma")
+		assert.NoError(t, err)
+		assert.Equal(t, int32(3), recordGamma.ReactionCount)
+	})
+
+	t.Run("EdgeCase_DatabaseDisconnectDuringDrain", func(t *testing.T) {
+		// Pre-load the buffer with new actions
+		err := reactionDAL.IncrementReaction(ctx, "match_gamma", 4)
+		assert.NoError(t, err)
+
+		// 1. Manually isolate the buffer into the processing key (simulating step 1-3 of flush)
+		bufferKey := "purplehoney:match_reaction_counter:reaction_count:buffer"
+		processingKey := bufferKey + ":processing"
+		err = redisProvider.Rename(ctx, bufferKey, processingKey)
+		assert.NoError(t, err)
+
+		// 2. Disconnect MySQL entirely to trigger a failure during UpsertsBulk
+		dbProvider.Disconnect()
+
+		// 3. Attempt to drain. It must return true (indicating failure) and NOT delete the processing key.
+		failed := flusher.drain(ctx, processingKey)
+		assert.True(t, failed)
+
+		// Verify processing key is still safe and sound in Redis
+		results, _, _ := redisProvider.HScan(ctx, processingKey, 0, "*", 100)
+		assert.Greater(t, len(results), 0, "Processing key should have been retained to prevent data loss")
+
+		// 4. Restore MySQL connection
+		err = dbProvider.Connect()
+		assert.NoError(t, err)
+
+		// 5. Trigger standard flush. It should recover the leftover processing key and apply it.
+		flusher.flush(ctx)
+
+		recordGamma, err := reactionDAL.GetByMatchUid(ctx, "match_gamma")
+		assert.NoError(t, err)
+		assert.Equal(t, int32(7), recordGamma.ReactionCount) // 3 (previous) + 4 (recovered delta)
+
+		// Verify processing key is finally gone
+		results, _, _ = redisProvider.HScan(ctx, processingKey, 0, "*", 100)
+		assert.Equal(t, 0, len(results), "Processing key should be deleted after successful recovery")
 	})
 }

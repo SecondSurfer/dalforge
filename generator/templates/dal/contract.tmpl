@@ -207,5 +207,12 @@ type {{$entityStructName}}Repository interface {
     Hard{{pascalCase .Name}}(ctx context.Context{{if $funcParams}}, {{$funcParams}}{{end}}) (int64, error)
     {{- end}}
 {{end}}
+
+{{- if .BufferedCounters }}
+	{{- range .BufferedCounters }}
+	// {{pascalCase .Name}} executes an O(1) in-memory increment to be flushed later.
+	{{pascalCase .Name}}(ctx context.Context, {{camelCase .GroupBy}} string, delta int) error
+	{{- end }}
+{{- end }}
 }
 

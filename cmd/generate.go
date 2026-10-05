@@ -14,9 +14,10 @@ import (
 // generateCmd represents the 'generate' command.
 var generateCmd = &cobra.Command{
 	Use:   "generate [input-directory] [output-directory]",
-	Short: "Generate .gen.go, _impl.gen.go, and .sql files from YAML definitions",
+	Short: "Generate .gen.go, _impl.gen.go, _flusher.gen.go, and .sql files from YAML definitions",
 	Long: `This command scans the specified input directory for YAML (.yaml) files,
-then generates the corresponding contract (.gen.go), implementation (_impl.gen.go), and .sql destination file paths. 
+then generates the corresponding contract (.gen.go), implementation (_impl.gen.go), 
+background worker (_flusher.gen.go if configured), and .sql destination file paths. 
 If no input directory is provided, the current directory is used.
 If no output directory is provided, it defaults to the same directory as input.`,
 	Args: cobra.RangeArgs(0, 2),
@@ -82,8 +83,8 @@ func generate(cmd *cobra.Command, args []string) {
 
 			yamlContent := string(data)
 
-			// Generate both Go outputs (Contract & Implementation)
-			contractFile, implFile, err := gen.GenerateDAL(yamlContent)
+			// Generate Go outputs (Contract, Implementation, Flusher)
+			contractFile, implFile, flusherFile, err := gen.GenerateDAL(yamlContent)
 			if err != nil {
 				log.Fatalf("Failed GenerateDAL on file %s, %v", inputFile, err)
 			}
@@ -106,6 +107,16 @@ func generate(cmd *cobra.Command, args []string) {
 				log.Fatalf("failed writing DAL impl content to file %s, %v", implGoPath, err)
 			}
 			fmt.Printf("Generated Implementation: %s\n", implGoPath)
+
+			// NEW: Conditionally write Flusher (_flusher.gen.go)
+			if flusherFile != "" {
+				flusherGoPath := filepath.Join(outputDir, baseName+"_flusher.gen.go")
+				err = os.WriteFile(flusherGoPath, []byte(flusherFile), 0644)
+				if err != nil {
+					log.Fatalf("failed writing DAL flusher content to file %s, %v", flusherGoPath, err)
+				}
+				fmt.Printf("Generated Flusher Worker: %s\n", flusherGoPath)
+			}
 
 			// Generate SQL file
 			sqlFile, err := gen.GenerateSQL(yamlContent)

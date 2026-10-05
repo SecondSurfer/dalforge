@@ -24,6 +24,13 @@ operations:
         - reaction_count
       increment: true 
 
+# Buffered Counter configuration for O(1) Redis increments
+bufferedCounters:
+  - name: increment_reaction
+    column: reaction_count
+    groupBy: match_uid
+    flushIntervalSeconds: 300
+
 circuitbreaker:
   timeoutSeconds: 20
   consecutiveFailures: 4
