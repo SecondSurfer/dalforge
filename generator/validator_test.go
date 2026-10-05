@@ -20,7 +20,8 @@ func TestValidateEntityConfig_Valid(t *testing.T) {
 			"updated":     {Type: "datetime", AllowNull: false, Unique: false},
 		},
 		Operations: OperationConfig{
-			Gets: []string{"id", "email", "public_id"},
+			Gets:     []string{"id", "email", "public_id"},
+			GetsBulk: []string{"id"},
 			Lists: []ListConfig{
 				{
 					Name:       "user_list",

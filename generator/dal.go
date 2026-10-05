@@ -179,6 +179,22 @@ func (g *Generator) parseYAML(yamlInput string) (EntityConfig, error) {
 		}
 	}
 
+	// ARCHITECTURE: Auto-inject 'id' into GetsBulk if lists exist.
+	// This guarantees the scatter-gather cache resolution logic in list_operation.tmpl
+	// always has the GetByIds method available without forcing YAML boilerplate.
+	if len(config.Operations.Lists) > 0 {
+		hasBulkID := false
+		for _, col := range config.Operations.GetsBulk {
+			if col == "id" {
+				hasBulkID = true
+				break
+			}
+		}
+		if !hasBulkID {
+			config.Operations.GetsBulk = append(config.Operations.GetsBulk, "id")
+		}
+	}
+
 	if config.Caching.ListInvalidation == "" {
 		config.Caching.ListInvalidation = "flush"
 	}

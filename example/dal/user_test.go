@@ -1100,3 +1100,94 @@ func TestUserUpsertBulk(t *testing.T) {
 		assert.ErrorContains(t, err, "exceeds maximum limit of 5000 items")
 	})
 }
+
+func TestListByIdScatterGatherHealing(t *testing.T) {
+	t.Run("TestScatterGatherAndZombieHealing", func(t *testing.T) {
+		setupTestDB(t)
+		defer teardownTestDB(t)
+
+		userDAL := NewUserRepository(
+			dbProvider,
+			nil,
+			nil,
+			gobreaker.Settings{},
+			PrometheusTelemetryProvider{},
+		)
+		ctx := context.Background()
+
+		// 1. Seed 5 users
+		var createdUsers []*User
+		for i := 1; i <= 5; i++ {
+			u, err := userDAL.Create(ctx, &User{
+				Age:       25,
+				Email:     fmt.Sprintf("scatter_%d@example.com", i),
+				Status:    Ptr("active"),
+				Birthdate: Ptr(time.Now()),
+			})
+			assert.NoError(t, err)
+			createdUsers = append(createdUsers, u)
+		}
+
+		// 2. Warm up the list cache
+		pageSize := 10
+		page1, err := userDAL.ListById(ctx, 0, pageSize)
+		assert.NoError(t, err)
+		assert.Len(t, page1, 5)
+
+		// Reset telemetry to accurately track the scatter-gather metrics
+		ResetTelemetry()
+
+		// 3. SCATTER-GATHER TEST
+		// Evict one item from the single-item cache to trigger the partial miss cascade.
+		evictedUser := createdUsers[2]
+		concreteDAL := userDAL.(*userRepository)
+		cacheKey := concreteDAL.getCacheKey(evictedUser.ID)
+		concreteDAL.cache.Delete(cacheKey)
+
+		// Call ListById again. It should hit the list cache, miss on the single item, and selectively call GetByIds.
+		page1Recovered, err := userDAL.ListById(ctx, 0, pageSize)
+		assert.NoError(t, err)
+		assert.Len(t, page1Recovered, 5, "Expected all 5 users to be returned in order")
+
+		// Verify telemetry: We expect a list cache hit, a single item cache miss, and exactly one bulk fetch.
+		listHits := testutil.ToFloat64(dalCacheHitsCounter.WithLabelValues("user", "list_by_id"))
+		assert.Equal(t, 1.0, listHits, "Expected list cache hit")
+
+		itemMisses := testutil.ToFloat64(dalCacheMissesCounter.WithLabelValues("user", "get_by_id"))
+		// ARCHITECTURE: We expect exactly 2 misses.
+		// 1 miss during the initial ListById array iteration.
+		// 1 miss inside the delegated GetByIds generic bulk fetcher verifying local memory.
+		assert.Equal(t, 2.0, itemMisses, "Expected exactly 2 item cache misses due to scatter-gather delegation")
+
+		bulkGets := testutil.ToFloat64(dalOperationsTotalCounter.WithLabelValues("user", "get_bulk_by_id"))
+		assert.Equal(t, 1.0, bulkGets, "Expected GetByIds to be called once for the missing item")
+
+		// 4. ZOMBIE ID HEALING TEST
+		ResetTelemetry()
+		zombieUser := createdUsers[4]
+
+		// Hard delete a user directly from DB to bypass DAL cache invalidation (simulating an external data wipe or race condition)
+		db, _ := dbProvider.GetDatabase("user", true)
+		_, err = db.ExecContext(ctx, "DELETE FROM users WHERE id = ?", zombieUser.ID)
+		assert.NoError(t, err)
+
+		// Remove it from the local item cache so the scatter-gather is forced to look for it in the DB
+		concreteDAL.cache.Delete(concreteDAL.getCacheKey(zombieUser.ID))
+
+		// Call ListById. It will try to scatter-gather the zombie ID, fail to find it, compact the list, and heal the list cache.
+		page1Compacted, err := userDAL.ListById(ctx, 0, pageSize)
+		assert.NoError(t, err)
+		assert.Len(t, page1Compacted, 4, "Expected list to be compacted to 4 items")
+
+		// 5. CACHE HEALING VERIFICATION
+		ResetTelemetry()
+
+		// Call ListById one last time to prove the list cache was successfully deleted during compaction
+		_, err = userDAL.ListById(ctx, 0, pageSize)
+		assert.NoError(t, err)
+
+		// Because the previous call healed (deleted) the list cache, this MUST result in a list cache miss
+		listMissesAfterHeal := testutil.ToFloat64(dalCacheMissesCounter.WithLabelValues("user", "list_by_id"))
+		assert.Equal(t, 1.0, listMissesAfterHeal, "Expected list cache miss because the zombie healing should have deleted the stale list key")
+	})
+}

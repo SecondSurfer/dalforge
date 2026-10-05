@@ -19,32 +19,69 @@ func (d *{{$entityArgumentName}}Repository) {{.List.Name | pascalCase}}(ctx cont
             return nil, fmt.Errorf("{{$entityArgumentName}}Repository.{{.List.Name | pascalCase}}: Cache returned wrong type; expected array ID type")
         }
 
-        var entities []*{{$entityStructName}}
-        missingEntries := false
-        for _, id := range entityIDs {
+        // ARCHITECTURE: Pre-allocate slice capacity to match the cached list length to avoid memory reallocations.
+        entities := make([]*{{$entityStructName}}, len(entityIDs))
+        var missingIDs []int64
+        
+        // ARCHITECTURE: Map to track the original index of missing IDs so we can restore order after bulk fetch.
+        missingIndexMap := make(map[int64]int)
+        cacheError := false
+
+        for i, id := range entityIDs {
             entity, err := d.getByIDCached(id)
             if err != nil {
-                // failed using cache
-                return nil, err
-            }
-
-            if entity == nil {
-                // we have one or more missing entity in cache somehow. reload the whole list.
-                missingEntries = true
+                cacheError = true
                 break
             }
 
-            entities = append(entities, entity)
+            if entity == nil {
+                missingIDs = append(missingIDs, id)
+                missingIndexMap[id] = i
+            } else {
+                entities[i] = entity
+            }
         }
 
-        if !missingEntries {
-            d.telemetryProvider.IncCacheHit("{{$entityTableName}}", operation)        
-            return entities, nil
+        if !cacheError {
+            if len(missingIDs) > 0 {
+                // ARCHITECTURE: Scatter-gather missing items directly via GetByIds instead of dumping the whole list.
+                // This preserves the O(1) eventual consistency benefit of the 'expire' strategy.
+                missingEntities, err := d.GetByIds(ctx, missingIDs)
+                if err == nil {
+                    // Restore the missing entities into their correct original positions
+                    for _, missingEntity := range missingEntities {
+                        if idx, ok := missingIndexMap[missingEntity.ID]; ok {
+                            entities[idx] = missingEntity
+                        }
+                    }
+
+                    // Compact the slice in case some entities were permanently deleted and GetByIds didn't return them
+                    compactedEntities := make([]*{{$entityStructName}}, 0, len(entities))
+                    for _, e := range entities {
+                        if e != nil {
+                            compactedEntities = append(compactedEntities, e)
+                        }
+                    }
+
+                    // ARCHITECTURE: If items were dropped, the cached ID list is holding "zombie" IDs.
+                    // Delete the list cache key so the next query repopulates a fresh, accurate array from the DB.
+                    if len(compactedEntities) != len(entityIDs) {
+                        d.listCache.Delete(cacheKey)
+                    }
+
+                    d.telemetryProvider.IncCacheHit("{{$entityTableName}}", operation)
+                    return compactedEntities, nil
+                }
+                // If GetByIds fails, we fall through to the full DB list query
+            } else {
+                d.telemetryProvider.IncCacheHit("{{$entityTableName}}", operation)
+                return entities, nil
+            }
         }
     }
 
-    // Otherwise, it's a cache miss or decode error
-     d.telemetryProvider.IncCacheMiss("{{$entityTableName}}", operation)       
+    // Otherwise, it's a cache miss, decode error, or bulk fetch failure
+    d.telemetryProvider.IncCacheMiss("{{$entityTableName}}", operation)       
 
     // 2) Fallback to DB
     result, err := d.dbBreaker.Execute(func() (interface{}, error) {
@@ -57,15 +94,16 @@ func (d *{{$entityArgumentName}}Repository) {{.List.Name | pascalCase}}(ctx cont
     }
 
     entities := result.([]*{{$entityStructName}})
+    
     // Store Cache. cacheKey = user_list_by_id:startID:pageSize.
-	// Stored is array of entity IDs.
-	var entityIDs []int64
+	// Stored is an array of entity IDs.
+	var newEntityIDs []int64
 	for _, entity := range entities {
-		entityIDs = append(entityIDs, entity.ID)
-        // cache each entity individualy
+		newEntityIDs = append(newEntityIDs, entity.ID)
+        // cache each entity individually
         d.setCached(entity)
 	}
-	d.listCache.Set(cacheKey, entityIDs, time.Second*{{.Root.Caching.ListExpirationSeconds}})
+	d.listCache.Set(cacheKey, newEntityIDs, time.Second*{{.Root.Caching.ListExpirationSeconds}})
 
     return entities, nil
 }
@@ -110,7 +148,7 @@ func (d *{{$entityArgumentName}}Repository) {{.List.Name | camelCase}}(ctx conte
 		err := rows.Scan(
 			&entity.ID,
             &entity.Version,
-            {{range $colName, $col := .Root.Columns}}{{if ne $colName "id"}}&entity.{{$colName | pascalCase}},
+            {{range $colName,$col := .Root.Columns}}{{if ne $colName "id"}}&entity.{{$colName | pascalCase}},
             {{end}}{{end}}&entity.Created,
             &entity.Updated,
             {{if .Root.Operations.SoftDelete}}&entity.DeletedAt,{{end}}

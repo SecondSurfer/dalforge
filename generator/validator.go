@@ -21,7 +21,7 @@ func ValidateEntityConfig(entity EntityConfig) error {
 	errs = append(errs, validateColumns(entity.Columns)...)
 
 	// Validate operations.
-	errs = append(errs, validateOperationConfig(entity.Operations, entity.Columns)...)
+	errs = append(errs, validateOperationConfig(entity.Operations, entity.Columns, entity.Name)...)
 
 	// Validate caching config.
 	errs = append(errs, validateCachingConfig(entity.Caching)...)
@@ -113,7 +113,7 @@ func validateColumns(columns map[string]Column) []string {
 // For Gets: each referenced column must exist and be marked as unique.
 // For Lists: it calls validateListConfigs.
 // validateOperationConfig validates Gets, Lists, and Deletes in operations.
-func validateOperationConfig(ops OperationConfig, columns map[string]Column) []string {
+func validateOperationConfig(ops OperationConfig, columns map[string]Column, entityName string) []string {
 	var errs []string
 
 	// 🚀 NEW: Global name collision tracker
@@ -153,6 +153,22 @@ func validateOperationConfig(ops OperationConfig, columns map[string]Column) []s
 	}
 	for _, u := range ops.UpsertsBulk {
 		checkName(u.Name, "upsertsBulk")
+	}
+
+	// ARCHITECTURAL GUARDRAIL: If an entity has paginated lists, it MUST have a bulk ID fetcher.
+	// This ensures the list cache can seamlessly resolve missing individual items (scatter-gather)
+	// when items are evicted from the local memory cache due to capacity limits.
+	if len(ops.Lists) > 0 {
+		hasBulkID := false
+		for _, col := range ops.GetsBulk {
+			if col == "id" {
+				hasBulkID = true
+				break
+			}
+		}
+		if !hasBulkID {
+			errs = append(errs, fmt.Sprintf("entity '%s' defines 'lists', which requires 'id' to be declared in 'getsBulk' to support scatter-gather cache resolution", entityName))
+		}
 	}
 
 	// Validate Gets.

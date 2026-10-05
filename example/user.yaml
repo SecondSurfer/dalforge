@@ -30,7 +30,6 @@ operations:
 
   getsBulk:   # Generate GetByUids and GetByIds with in-memory cache checks
     - uid
-    - id
     
   updatesBulk: # Generate surgical bulk partial updates using IN (...)
     - name: update_status_by_uids

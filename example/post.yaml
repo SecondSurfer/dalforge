@@ -20,7 +20,6 @@ columns:
 operations:
   write: true
   delete: true
-  gets:
   lists:
     - name: list_by_id
     - name: recent_posts
