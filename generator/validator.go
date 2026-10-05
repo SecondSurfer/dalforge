@@ -149,6 +149,9 @@ func validateOperationConfig(ops OperationConfig, columns map[string]Column) []s
 	for _, p := range ops.Plucks {
 		checkName(p.Name, "plucks")
 	}
+	for _, u := range ops.UpsertsBulk {
+		checkName(u.Name, "upsertsBulk")
+	}
 
 	// Validate Gets.
 	for _, colName := range ops.Gets {
@@ -176,6 +179,8 @@ func validateOperationConfig(ops OperationConfig, columns map[string]Column) []s
 	errs = append(errs, validateListsBulk(ops.ListsBulk, columns)...)
 
 	errs = append(errs, validatePlucks(ops.Plucks, columns)...)
+
+	errs = append(errs, validateUpsertsBulk(ops.UpsertsBulk, columns)...)
 
 	return errs
 }
@@ -428,4 +433,46 @@ func validateCircuitBreakerConfig(c CircuitBreakerConfig) []string {
 func isSnakeCase(s string) bool {
 	re := regexp.MustCompile(`^[a-z0-9]+(_[a-z0-9]+)*$`)
 	return re.MatchString(s)
+}
+
+// validateUpsertsBulk ensures bulk upserts are configured correctly safely.
+func validateUpsertsBulk(upserts []UpsertBulkConfig, columns map[string]Column) []string {
+	var errs []string
+
+	for _, u := range upserts {
+		// 1. Validate Name
+		if len(u.Name) <= 4 {
+			errs = append(errs, fmt.Sprintf("upsertsBulk name '%s' must be longer than 4 characters", u.Name))
+		}
+		if strings.Contains(u.Name, " ") {
+			errs = append(errs, fmt.Sprintf("upsertsBulk name '%s' must not contain spaces", u.Name))
+		}
+		if !isSnakeCase(u.Name) {
+			errs = append(errs, fmt.Sprintf("upsertsBulk name '%s' must be in snake_case", u.Name))
+		}
+
+		// 2. Validate ConflictTarget column
+		if u.ConflictTarget != "id" {
+			if col, exists := columns[u.ConflictTarget]; !exists {
+				errs = append(errs, fmt.Sprintf("upsertsBulk '%s' refers to unknown conflictTarget column '%s'", u.Name, u.ConflictTarget))
+			} else if !col.Unique {
+				errs = append(errs, fmt.Sprintf("upsertsBulk '%s' conflictTarget '%s' must be a unique column for MySQL UPSERT to work reliably", u.Name, u.ConflictTarget))
+			}
+		}
+
+		// 3. Validate UpdateColumns
+		if len(u.UpdateColumns) == 0 {
+			errs = append(errs, fmt.Sprintf("upsertsBulk '%s' must specify at least one column in 'updateColumns'", u.Name))
+		}
+		for _, updCol := range u.UpdateColumns {
+			if updCol == "id" || updCol == "created" {
+				errs = append(errs, fmt.Sprintf("upsertsBulk '%s' cannot update immutable column '%s'", u.Name, updCol))
+			} else if updCol != "updated" {
+				if _, exists := columns[updCol]; !exists {
+					errs = append(errs, fmt.Sprintf("upsertsBulk '%s' refers to unknown update column '%s'", u.Name, updCol))
+				}
+			}
+		}
+	}
+	return errs
 }

@@ -1,0 +1,130 @@
+{{define "upsert_bulk"}}
+{{- $entityStructName := pascalCase .Root.Name }}
+{{- $entityTableName := snakeCase .Root.Name }}
+{{- $entityArgumentName := camelCase .Root.Name }}
+{{- $upd := .UpsertConfig }}
+{{- $funcName := pascalCase $upd.Name }}
+
+// {{$funcName}} executes a bulk upsert (INSERT ... ON DUPLICATE KEY UPDATE).
+//
+// CACHING NOTE:
+// This operation modifies records in bulk. To safely maintain cache integrity,
+// it triggers a global FlushAllCache() if any rows are affected.
+func (d *{{$entityArgumentName}}Repository) {{$funcName}}(ctx context.Context, entities []*{{$entityStructName}}) error {
+	if d.configProvider.BlockedWrites("{{$entityTableName}}") {
+		return ErrOperationBlocked
+	}
+
+	if len(entities) == 0 {
+		return nil
+	}
+
+	// Hard limit to prevent massive memory allocations and driver crashes
+	if len(entities) > 5000 {
+		return fmt.Errorf("bulk upsert operation exceeds maximum limit of 5000 items")
+	}
+
+	const operation = "upsert_bulk_{{$upd.Name | snakeCase}}"
+	d.telemetryProvider.IncDALOperation("{{$entityTableName}}", operation)
+
+	result, err := d.dbBreaker.Execute(func() (interface{}, error) {
+		return d.{{camelCase $upd.Name}}(ctx, entities)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	rowsAffected := result.(int64)
+	if rowsAffected > 0 {
+		d.FlushAllCache()
+	}
+
+	return nil
+}
+
+func (d *{{$entityArgumentName}}Repository) {{camelCase $upd.Name}}(ctx context.Context, entities []*{{$entityStructName}}) (int64, error) {
+	const operation = "upsert_bulk_{{$upd.Name | snakeCase}}"
+	start := time.Now()
+	now := time.Now().Truncate(time.Second)
+
+	db, dbErr := d.dbProvider.GetDatabase("{{$entityTableName}}", true)
+	if dbErr != nil {
+		d.telemetryProvider.IncDBError("{{$entityTableName}}", operation)
+		return 0, dbErr
+	}
+
+	var totalRowsAffected int64
+	batchSize := 500
+
+	for i := 0; i < len(entities); i += batchSize {
+		end := i + batchSize
+		if end > len(entities) {
+			end = len(entities)
+		}
+		chunk := entities[i:end]
+
+		valuePlaceholders := make([]string, 0, len(chunk))
+		// Dynamically calculate fields per entity: custom columns + 2 (created, updated)
+		params := make([]interface{}, 0, len(chunk)*({{len .Root.Columns}} + 2))
+
+		for _, entity := range chunk {
+			if entity.Created.IsZero() {
+				entity.Created = now
+			}
+			if entity.Updated.IsZero() {
+				entity.Updated = entity.Created
+			}
+
+			{{- range $colName, $col := .Root.Columns }}
+			{{- if and (eq $col.Type "uid") $col.Unique }}
+			if entity.{{ $colName | pascalCase }} == "" {
+				entity.{{ $colName | pascalCase }} = GenerateUID("{{ $col.Prefix }}")
+			}
+			{{- end }}
+			{{- end }}
+
+			valuePlaceholders = append(valuePlaceholders, "({{- range $index,$colName := keys .Root.Columns -}}?,{{- end }}?,?)")
+			params = append(params,
+				{{- range $colName,$col := .Root.Columns}}
+				entity.{{$colName | pascalCase}},
+				{{- end}}
+				entity.Created,
+				entity.Updated,
+			)
+		}
+
+		query := fmt.Sprintf(`
+			INSERT INTO {{$entityTableName}}s
+			({{- template "comma_separated_columns" .Root.Columns}}created,updated)
+			VALUES %s
+			ON DUPLICATE KEY UPDATE
+			{{- range $updCol := $upd.UpdateColumns }}
+				{{- if $upd.Increment }}
+				{{$updCol | snakeCase}} = {{$entityTableName}}s.{{$updCol | snakeCase}} + VALUES({{$updCol | snakeCase}}),
+				{{- else }}
+				{{$updCol | snakeCase}} = VALUES({{$updCol | snakeCase}}),
+				{{- end }}
+			{{- end }}
+			updated = VALUES(updated),
+			version = {{$entityTableName}}s.version + 1
+		`, strings.Join(valuePlaceholders, ","))
+
+		res, err := db.ExecContext(ctx, query, params...)
+		if err != nil {
+			d.telemetryProvider.IncDBError("{{$entityTableName}}", operation)
+			return 0, fmt.Errorf("failed to bulk upsert {{$entityTableName}}s chunk: %w", err)
+		}
+
+		rowsAffected, err := res.RowsAffected()
+		if err == nil {
+			totalRowsAffected += rowsAffected
+		}
+	}
+
+	d.telemetryProvider.IncDBRequest("{{$entityTableName}}", operation)
+	d.telemetryProvider.ObserveDBLatency("{{$entityTableName}}", operation, time.Since(start).Seconds())
+	
+	return totalRowsAffected, nil
+}
+{{end}}

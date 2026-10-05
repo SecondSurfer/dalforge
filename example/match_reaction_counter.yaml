@@ -1,0 +1,35 @@
+name: match_reaction_counter
+version: v1
+columns:
+  match_uid:
+    type: varchar
+    unique: true
+    allowNull: false
+  reaction_count:
+    type: int32
+    allowNull: false
+operations:
+  write: true
+  delete: true
+  gets:
+    - match_uid
+  getsBulk:
+    - match_uid
+  
+  # Write-Behind buffer flush (Relative delta increment)
+  upsertsBulk:
+    - name: upsert_reaction_counts
+      conflictTarget: match_uid
+      updateColumns:
+        - reaction_count
+      increment: true 
+
+circuitbreaker:
+  timeoutSeconds: 20
+  consecutiveFailures: 4
+caching:
+  type: memory
+  singleExpirationSeconds: 300
+  listExpirationSeconds: 60
+  listInvalidation: expire
+  maxItemsCount: 100000

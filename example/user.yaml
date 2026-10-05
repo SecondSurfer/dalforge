@@ -42,6 +42,14 @@ operations:
         - age
       whereIn: id
 
+  upsertsBulk:
+    - name: upsert_user_snapshots
+      conflictTarget: uid
+      updateColumns:
+        - status
+        - meta
+      increment: false
+
   lists:
     - name: list_by_id                 # name of a function that will fetch multiple rows with pagination supported. This should be snake cased and have a name that sounds like multiple results are expected.
     - name: list_by_bday

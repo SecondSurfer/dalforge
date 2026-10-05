@@ -259,10 +259,18 @@ type OperationConfig struct {
 	ListsBulk   []ListBulkConfig   `yaml:"listsBulk"`
 	Deletes     []DeleteConfig     `yaml:"deletes"`
 	UpdatesBulk []UpdateBulkConfig `yaml:"updatesBulk"`
+	UpsertsBulk []UpsertBulkConfig `yaml:"upsertsBulk"`
 	Plucks      []PluckConfig      `yaml:"plucks"`
 	Write       bool               `yaml:"write"`
 	Delete      bool               `yaml:"delete"`
 	SoftDelete  bool               `yaml:"softDelete"`
+}
+
+type UpsertBulkConfig struct {
+	Name           string   `yaml:"name"`
+	ConflictTarget string   `yaml:"conflictTarget"`
+	UpdateColumns  []string `yaml:"updateColumns"`
+	Increment      bool     `yaml:"increment"`
 }
 
 type DeleteConfig struct {

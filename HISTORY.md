@@ -2,7 +2,7 @@
 
 ## v1.5.6 - 2026-10-05
   - change: output will now be <entity>.gen.go file for interface definitions and <entity>_impl.gen.go for implementations
-  - 
+  - new: added support for upsertBulk operations
 
 ## v1.5.5 - 2026-10-01
   - change: explicitly set Created or Updated on an entity will be used. Currently it would always default to now

@@ -42,6 +42,9 @@ func (d *{{$entityArgumentName}}Repository) GetBy{{.ColumnName | pascalCase}}(ct
 	}
 	entity := result.(*{{$entityStructName}})
 
+    // Warm up the primary entity cache
+	d.setCached(entity)
+
 	// Store in cache {{.ColumnName | pascalCase}} -> ID mapping
     d.telemetryProvider.IncCacheWrite("{{$entityTableName}}")    
     d.cache.Set(cacheKey, entity.ID, time.Second*{{.Root.Caching.SingleExpirationSeconds}})

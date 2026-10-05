@@ -117,6 +117,21 @@ type {{$entityStructName}}Repository interface {
     {{- end }}
 {{- end }}
 
+{{- if and .Operations .Operations.UpsertsBulk }}
+	{{- range .Operations.UpsertsBulk }}
+	// {{pascalCase .Name}} executes an INSERT ... ON DUPLICATE KEY UPDATE in batches.
+     // ⚠️ CAUTION - CACHE FLUSH NOTE ⚠️
+    // Because bulk updates modify multiple records simultaneously, it is difficult to 
+    // track and selectively invalidate individual cache entries safely. Therefore, if 
+    // this operation successfully updates one or more rows, it will trigger a global 
+    // FlushAllCache() to ensure local memory safety and broadcast cache invalidation 
+    // to peer nodes via Pub/Sub. Use this operation carefully in high-read environments.
+    //
+    // This operation is hard-limited to 5000 items and executes in database batches of 500.
+	{{pascalCase .Name}}(ctx context.Context, entities []*{{$entityStructName}}) error
+	{{- end }}
+{{- end }}
+
 {{- /* Bulk Lists Interface */ -}}
 {{- if and .Operations .Operations.ListsBulk }}
     {{- range .Operations.ListsBulk }}

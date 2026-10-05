@@ -127,7 +127,8 @@ func setupTestDB(t *testing.T) {
 		t.Fatal("failed connecting to database")
 	}
 
-	migrate(t, dbName)
+	// Feed ALL necessary schemas for testing
+	migrate(t, dbName, "user.sql", "match_reaction_counter.sql")
 }
 
 func teardownTestDB(t *testing.T) {
@@ -154,21 +155,23 @@ func teardownTestDB(t *testing.T) {
 	}
 }
 
-func migrate(t *testing.T, dbName string) {
-	// Load SQL schema from file
-	content, err := os.ReadFile("user.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-
+func migrate(t *testing.T, dbName string, fileNames ...string) {
 	db, err := dbProvider.GetDatabase("", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = db.ExecContext(context.Background(), string(content))
-	if err != nil {
-		t.Fatal(err)
+	for _, fileName := range fileNames {
+		// Load SQL schema from file
+		content, err := os.ReadFile(fileName)
+		if err != nil {
+			t.Fatalf("failed reading schema file %s: %v", fileName, err)
+		}
+
+		_, err = db.ExecContext(context.Background(), string(content))
+		if err != nil {
+			t.Fatalf("failed executing schema file %s: %v", fileName, err)
+		}
 	}
 }
 
@@ -990,5 +993,106 @@ func TestUserBulkUpdates(t *testing.T) {
 		// 7. Test Empty Slices
 		err = userDAL.UpdateAgeByIds(ctx, 30, []int64{})
 		assert.NoError(t, err)
+	})
+}
+
+func TestUserUpsertBulk(t *testing.T) {
+	t.Run("TestUpsertUserSnapshots", func(t *testing.T) {
+		setupTestDB(t)
+		defer teardownTestDB(t)
+
+		// Instantiate the repository behind its interface to mirror the Service layer
+		userDAL := NewUserRepository(
+			dbProvider,
+			nil, // default cache provider
+			nil, // default config provider
+			gobreaker.Settings{},
+			PrometheusTelemetryProvider{},
+		)
+		ctx := context.Background()
+
+		// 1. Initial Insert using Upsert
+		meta1 := json.RawMessage(`{"theme":"dark"}`)
+		meta2 := json.RawMessage(`{"theme":"light"}`)
+
+		uid1 := "user_upsert_1"
+		uid2 := "user_upsert_2"
+
+		users := []*User{
+			{
+				Age:       25,
+				Email:     "upsert1@example.com",
+				Status:    Ptr("active"),
+				Uid:       uid1,
+				Meta:      &meta1,
+				Birthdate: Ptr(time.Now()),
+			},
+			{
+				Age:       30,
+				Email:     "upsert2@example.com",
+				Status:    Ptr("pending"),
+				Uid:       uid2,
+				Meta:      &meta2,
+				Birthdate: Ptr(time.Now()),
+			},
+		}
+
+		err := userDAL.UpsertUserSnapshots(ctx, users)
+		assert.NoError(t, err)
+
+		// Verify telemetry for the bulk operation
+		opsCounter := testutil.ToFloat64(dalOperationsTotalCounter.WithLabelValues("user", "upsert_bulk_upsert_user_snapshots"))
+		assert.Equal(t, 1.0, opsCounter, "Expected one upsert bulk operation")
+
+		// Fetch the newly created records to get their IDs and warm the local cache
+		fetched1, err := userDAL.GetByUid(ctx, uid1)
+		assert.NoError(t, err)
+		fetched2, err := userDAL.GetByUid(ctx, uid2)
+		assert.NoError(t, err)
+
+		// Verify they are cached correctly
+		hitsBefore := testutil.ToFloat64(dalCacheHitsCounter.WithLabelValues("user", "get_by_id"))
+		_, err = userDAL.GetByID(ctx, fetched1.ID)
+		assert.NoError(t, err)
+		hitsAfter := testutil.ToFloat64(dalCacheHitsCounter.WithLabelValues("user", "get_by_id"))
+		assert.Greater(t, hitsAfter, hitsBefore, "Expected a cache hit after fetching via GetByUid")
+
+		// 2. Update existing records via Upsert (Absolute Snapshot Sync)
+		newMeta := json.RawMessage(`{"theme":"system"}`)
+
+		// We modify the statuses and metadata for our snapshot update
+		fetched1.Status = Ptr("banned")
+		fetched1.Meta = &newMeta
+
+		fetched2.Status = Ptr("active")
+
+		err = userDAL.UpsertUserSnapshots(ctx, []*User{fetched1, fetched2})
+		assert.NoError(t, err)
+
+		// Verify cache flush behavior
+		// Since Upsert bypasses individual item tracking, it must trigger a global flush.
+		missesBefore := testutil.ToFloat64(dalCacheMissesCounter.WithLabelValues("user", "get_by_id"))
+
+		updated1, err := userDAL.GetByID(ctx, fetched1.ID)
+		assert.NoError(t, err)
+
+		missesAfter := testutil.ToFloat64(dalCacheMissesCounter.WithLabelValues("user", "get_by_id"))
+		assert.Greater(t, missesAfter, missesBefore, "Cache should have been flushed by the upsert, resulting in a cache miss")
+
+		// Verify fields were updated correctly
+		assert.Equal(t, "banned", *updated1.Status)
+		assert.JSONEq(t, `{"theme":"system"}`, string(*updated1.Meta))
+
+		// Ensure internal versioning is correctly incremented by the ON DUPLICATE KEY UPDATE clause
+		assert.Greater(t, updated1.Version, fetched1.Version, "Version should be incremented upon upsert")
+
+		updated2, _ := userDAL.GetByID(ctx, fetched2.ID)
+		assert.Equal(t, "active", *updated2.Status)
+
+		// 3. Test Hard Limits
+		// Protects the infrastructure from massive memory spikes and runaway queries
+		overLimit := make([]*User, 5001)
+		err = userDAL.UpsertUserSnapshots(ctx, overLimit)
+		assert.ErrorContains(t, err, "exceeds maximum limit of 5000 items")
 	})
 }

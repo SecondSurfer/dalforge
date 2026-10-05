@@ -166,6 +166,12 @@ func (d *{{$entityArgumentName}}Repository) getCacheKey(id int64) string {
     {{- end }}
 {{- end }}
 
+{{- if and .Operations .Operations.UpsertsBulk }}
+	{{- range .Operations.UpsertsBulk }}
+{{template "upsert_bulk" (dict "Root" $ "UpsertConfig" .)}}
+	{{- end }}
+{{- end }}
+
 {{- if and .Operations .Operations.ListsBulk }}
     {{- range .Operations.ListsBulk }}
 {{template "list_bulk_operation" (dict "Root" $ "ListBulk" .)}}
