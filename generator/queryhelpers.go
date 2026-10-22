@@ -73,6 +73,89 @@ func replaceParams(query string) string {
 	return re.ReplaceAllString(query, "?")
 }
 
+// formatWhereClause replaces named parameters (:param -> ?) and wraps recognized
+// table column names in backticks so MySQL reserved keywords (e.g., `order`, `status`, `match`)
+// in custom YAML where clauses never cause syntax errors.
+// It safely ignores single-quoted strings ('...'), double-quoted strings ("..."), and
+// identifiers that are already wrapped in backticks (`...`).
+func formatWhereClause(where string, columns map[string]Column) string {
+	// 1. Replace :named_params with ? first so parameter names are never mistaken for columns.
+	s := replaceParams(where)
+
+	isColumn := func(word string) bool {
+		if word == "id" || word == "version" || word == "created" || word == "updated" || word == "deleted_at" {
+			return true
+		}
+		_, ok := columns[word]
+		return ok
+	}
+
+	var out strings.Builder
+	n := len(s)
+	i := 0
+
+	for i < n {
+		ch := s[i]
+
+		// Pass through already-backticked identifiers untouched: `...`
+		if ch == '`' {
+			out.WriteByte(ch)
+			i++
+			for i < n && s[i] != '`' {
+				out.WriteByte(s[i])
+				i++
+			}
+			if i < n {
+				out.WriteByte(s[i])
+				i++
+			}
+			continue
+		}
+
+		// Pass through single-quoted or double-quoted SQL string literals untouched
+		if ch == '\'' || ch == '"' {
+			quote := ch
+			out.WriteByte(ch)
+			i++
+			for i < n && s[i] != quote {
+				if s[i] == '\\' && i+1 < n {
+					out.WriteByte(s[i])
+					i++
+				}
+				out.WriteByte(s[i])
+				i++
+			}
+			if i < n {
+				out.WriteByte(s[i])
+				i++
+			}
+			continue
+		}
+
+		// Check if start of an identifier word
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' {
+			start := i
+			for i < n && ((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '_') {
+				i++
+			}
+			word := s[start:i]
+			if isColumn(word) {
+				out.WriteString("`")
+				out.WriteString(SnakeCaser(word))
+				out.WriteString("`")
+			} else {
+				out.WriteString(word)
+			}
+			continue
+		}
+
+		out.WriteByte(ch)
+		i++
+	}
+
+	return out.String()
+}
+
 /*
 	Makes the where part of this query.
 
@@ -82,11 +165,11 @@ query = SELECT * FROM `posts` WHERE
 	AND id < ?  # Pagination if descending is true and startId != 0
 	AND id > ?  # Pagination if descending is false and startId != 0
 */
-func listWhereQuery(isStartIdZero bool, list ListConfig, softDelete bool) string {
+func listWhereQuery(isStartIdZero bool, list ListConfig, columns map[string]Column, softDelete bool) string {
 	result := ""
 	// if we have custom where clause
 	if strings.TrimSpace(list.Where) != "" {
-		result += "(" + replaceParams(list.Where) + ")"
+		result += "(" + formatWhereClause(list.Where, columns) + ")"
 	}
 
 	// Inject the soft delete scope
@@ -114,7 +197,7 @@ func listWhereQuery(isStartIdZero bool, list ListConfig, softDelete bool) string
 
 func listQuery(isStartIdZero bool, entityName string, list ListConfig, columns map[string]Column, softDelete bool) string {
 	result := ""
-	where := listWhereQuery(isStartIdZero, list, softDelete)
+	where := listWhereQuery(isStartIdZero, list, columns, softDelete)
 
 	result = fmt.Sprintf("SELECT %s FROM `%ss`", querySelect(columns, softDelete), SnakeCaser(entityName))
 	if where != "" {
@@ -138,7 +221,7 @@ func listQuery(isStartIdZero bool, entityName string, list ListConfig, columns m
 
 func countQuery(entityName string, list ListConfig, columns map[string]Column, softDelete bool) string {
 	result := ""
-	where := listWhereQuery(true, list, softDelete)
+	where := listWhereQuery(true, list, columns, softDelete)
 
 	result = fmt.Sprintf("SELECT count(*) FROM `%ss`", SnakeCaser(entityName))
 	if where != "" {
@@ -401,7 +484,7 @@ func countCacheKey(entityName string, list ListConfig, columns map[string]Column
 func deleteQuery(entityName string, del DeleteConfig, columns map[string]Column, softDelete bool, isHardDelete bool) string {
 	where := ""
 	if strings.TrimSpace(del.Where) != "" {
-		where = replaceParams(del.Where)
+		where = formatWhereClause(del.Where, columns)
 	}
 
 	// Soft Delete Logic
@@ -647,10 +730,10 @@ func listBulkInnerCallArgs(list ListBulkConfig) string {
 
 // listBulkQueryWhere constructs the raw SQL WHERE clause.
 // Example: "(user = ?) AND story_uid IN (%s) AND deleted_at IS NULL"
-func listBulkQueryWhere(list ListBulkConfig, softDelete bool) string {
+func listBulkQueryWhere(list ListBulkConfig, columns map[string]Column, softDelete bool) string {
 	result := ""
 	if strings.TrimSpace(list.Where) != "" {
-		result += "(" + replaceParams(list.Where) + ") AND "
+		result += "(" + formatWhereClause(list.Where, columns) + ") AND "
 	}
 
 	result += fmt.Sprintf("`%s` IN (%%s)", SnakeCaser(list.WhereIn))
@@ -739,10 +822,10 @@ func pluckCacheKey(entityName string, pluck PluckConfig, columns map[string]Colu
 	return fmt.Sprintf(`fmt.Sprintf("%s", %s)`, key, paramStr)
 }
 
-func pluckQueryWhere(pluck PluckConfig, softDelete bool) string {
+func pluckQueryWhere(pluck PluckConfig, columns map[string]Column, softDelete bool) string {
 	result := ""
 	if strings.TrimSpace(pluck.Where) != "" {
-		result += "(" + replaceParams(pluck.Where) + ")"
+		result += "(" + formatWhereClause(pluck.Where, columns) + ")"
 	}
 	if softDelete {
 		if result != "" {

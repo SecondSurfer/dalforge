@@ -52,7 +52,7 @@ func (d *{{$entityArgumentName}}Repository) {{camelCase $pluck.Name}}(ctx contex
     const operation = "pluck_{{$pluck.Name | snakeCase}}"
     dbStart := time.Now()
 
-    query := "SELECT `{{$pluck.Column | snakeCase}}` FROM `{{$entityTableName}}s` WHERE {{pluckQueryWhere $pluck .Root.Operations.SoftDelete}}"
+    query := "SELECT `{{$pluck.Column | snakeCase}}` FROM `{{$entityTableName}}s` WHERE {{pluckQueryWhere $pluck .Root.Columns .Root.Operations.SoftDelete}}"
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", false)
     if dbErr != nil {
