@@ -3,6 +3,7 @@ package generator
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -257,8 +258,12 @@ func listSQLIndexes(tableName string, columns map[string]Column, lists []ListCon
 			idxName = idxName[:64]
 		}
 
-		colStr := strings.Join(cols, ", ")
-		indexMap[colSignature] = fmt.Sprintf("CREATE INDEX %s ON %ss (%s);\n", idxName, SnakeCaser(tableName), colStr)
+		quotedCols := make([]string, len(cols))
+		for i, col := range cols {
+			quotedCols[i] = fmt.Sprintf("`%s`", SnakeCaser(col))
+		}
+		colStr := strings.Join(quotedCols, ", ")
+		indexMap[colSignature] = fmt.Sprintf("CREATE INDEX `%s` ON `%ss` (%s);\n", idxName, SnakeCaser(tableName), colStr)
 	}
 
 	// 1. Process Standard Lists
@@ -269,8 +274,7 @@ func listSQLIndexes(tableName string, columns map[string]Column, lists []ListCon
 	// 2. Process Bulk Lists
 	for _, listBulk := range listsBulk {
 		cols := extractIndexColumns(listBulk.Where, "", columns)
-		if listBulk.WhereIn != "" && listBulk.WhereIn != "id" {
-			// Append the IN column to the end of the index
+		if listBulk.WhereIn != "" && listBulk.WhereIn != "id" && !slices.Contains(cols, listBulk.WhereIn) {
 			cols = append(cols, listBulk.WhereIn)
 		}
 		addIndex(cols)
@@ -279,8 +283,7 @@ func listSQLIndexes(tableName string, columns map[string]Column, lists []ListCon
 	// 3. Process Plucks (Covering Indexes)
 	for _, pluck := range plucks {
 		cols := extractIndexColumns(pluck.Where, "", columns)
-		// Append the selected column to the index to create a "Covering Index"
-		if pluck.Column != "id" {
+		if pluck.Column != "id" && !slices.Contains(cols, pluck.Column) {
 			cols = append(cols, pluck.Column)
 		}
 		addIndex(cols)

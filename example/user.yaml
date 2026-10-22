@@ -20,6 +20,9 @@ columns:
   meta:
     type: json
     allowNull: true
+  random_unique:
+    type: int8
+    unique: true
 operations:
   write: true   # if true will generate proper write functions
   delete: true  # if true it will generate delete functions

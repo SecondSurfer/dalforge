@@ -1,25 +1,25 @@
-CREATE TABLE {{.Name | snakeCase}}s (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    version INT DEFAULT 0,
-    {{- range $colName, $col := .Columns}}
-    {{$colName | snakeCase}} {{toSQLType $col.Type}}{{if not $col.AllowNull}} NOT NULL{{end}},
+CREATE TABLE `{{.Name | snakeCase}}s` (
+    `id` BIGINT PRIMARY KEY AUTO_INCREMENT,
+    `version` INT DEFAULT 0,
+    {{- range $colName,$col := .Columns}}
+    `{{$colName | snakeCase}}` {{toSQLType $col.Type}}{{if not $col.AllowNull}} NOT NULL{{end}},
     {{- end}}
     {{if .Operations.SoftDelete}}
-    deleted_at TIMESTAMP NULL,
+    `deleted_at` TIMESTAMP NULL,
     {{end}}
-    created TIMESTAMP,
-    updated TIMESTAMP
+    `created` TIMESTAMP,
+    `updated` TIMESTAMP
 ) ENGINE=InnoDB;
 
 # Unique indexes as they serve Get operations returning single entity
 {{- range .Operations.Gets}}
 {{- $column := index $.Columns . }}
-CREATE UNIQUE INDEX idx_{{. | snakeCase}} ON {{$.Name | snakeCase}}s ({{. | snakeCase}});
+CREATE UNIQUE INDEX `idx_{{. | snakeCase}}` ON `{{$.Name | snakeCase}}s` (`{{. | snakeCase}}`);
 {{- end}}
 
 # Indexes that serve all operations
 {{ listSQLIndexes .Name .Columns .Operations.Lists .Operations.ListsBulk .Operations.Plucks .Operations.Deletes }}
 
 {{if .Operations.SoftDelete}}
-CREATE INDEX idx_deleted_at ON {{$.Name | snakeCase}}s (deleted_at);
+CREATE INDEX `idx_deleted_at` ON `{{$.Name | snakeCase}}s` (`deleted_at`);
 {{end}}

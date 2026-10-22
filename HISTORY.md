@@ -1,5 +1,8 @@
 # Version History
 
+## v1.5.7 - 2026-10-21
+  - fix: adding backticks to sql column names
+
 ## v1.5.6 - 2026-10-05
   - change: output will now be <entity>.gen.go file for interface definitions and <entity>_impl.gen.go for implementations
   - new: added support for upsertBulk operations
