@@ -116,9 +116,9 @@ func (d *{{$entityArgumentName}}Repository) {{.List.Name | camelCase}}(ctx conte
 
     // if startID is zero then query is different for pagination
     if startID == 0 {
-        query = `{{listQuery true $entityStructName .List .Root.Columns .Root.Operations.SoftDelete}}`
+        query = "{{listQuery true $entityStructName .List .Root.Columns .Root.Operations.SoftDelete}}"
     } else {
-        query = `{{listQuery false $entityStructName .List .Root.Columns .Root.Operations.SoftDelete}}`
+        query = "{{listQuery false $entityStructName .List .Root.Columns .Root.Operations.SoftDelete}}"
     }
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", false);

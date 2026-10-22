@@ -90,11 +90,7 @@ func (d *{{$entityArgumentName}}Repository) createBulk(ctx context.Context, enti
             )
         }
 
-        query := fmt.Sprintf(`
-            INSERT INTO {{$entityTableName}}s
-            ({{- template "comma_separated_columns" .Root.Columns}}created,updated)
-            VALUES %s
-        `, strings.Join(valuePlaceholders, ","))
+        query := fmt.Sprintf("INSERT INTO `{{$entityTableName}}s` ({{- template "comma_separated_columns" .Root.Columns}}`created`,`updated`) VALUES %s", strings.Join(valuePlaceholders, ","))
 
         result, err := db.ExecContext(ctx, query, params...)
         if err != nil {

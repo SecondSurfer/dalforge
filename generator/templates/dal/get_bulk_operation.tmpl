@@ -104,11 +104,7 @@ func (d *{{$entityArgumentName}}Repository) getBy{{.ColumnName | pluralize | pas
         placeholders[i] = "?"
     }
 
-    query := fmt.Sprintf(`
-        SELECT {{querySelect .Root.Columns .Root.Operations.SoftDelete}}
-        FROM {{$entityTableName}}s
-        WHERE {{.ColumnName | snakeCase}} IN (%s) {{if .Root.Operations.SoftDelete}}AND deleted_at IS NULL{{end}}
-    `, strings.Join(placeholders, ","))
+    query := fmt.Sprintf("SELECT {{querySelect .Root.Columns .Root.Operations.SoftDelete}} FROM `{{$entityTableName}}s` WHERE `{{.ColumnName | snakeCase}}` IN (%s){{if .Root.Operations.SoftDelete}} AND `deleted_at` IS NULL{{end}}", strings.Join(placeholders, ","))
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", false)
     if dbErr != nil {

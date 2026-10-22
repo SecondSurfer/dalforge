@@ -8,23 +8,23 @@ import (
 )
 
 func querySelect(columns map[string]Column, softDelete bool) string {
-	result := "id, version, "
+	result := "`id`, `version`, "
 
 	var names []string
 	for name := range columns {
 		names = append(names, name)
 	}
-	sort.Strings(names) // Sort alphabetically
+	sort.Strings(names) // Sort alphabetically for deterministic SQL generation
 
 	for _, name := range names {
-		result = result + fmt.Sprintf("%s, ", SnakeCaser(name))
+		result = result + fmt.Sprintf("`%s`, ", SnakeCaser(name))
 	}
 
-	result += "created, updated"
+	result += "`created`, `updated`"
 
 	// Inject deleted_at if soft deletes are enabled
 	if softDelete {
-		result += ", deleted_at"
+		result += ", `deleted_at`"
 	}
 
 	return result
@@ -94,19 +94,19 @@ func listWhereQuery(isStartIdZero bool, list ListConfig, softDelete bool) string
 		if result != "" {
 			result += " AND "
 		}
-		result += "deleted_at IS NULL"
+		result += "`deleted_at` IS NULL"
 	}
 
 	if list.Descending && !isStartIdZero && strings.TrimSpace(list.Order) != "" {
 		if result != "" {
 			result += " AND "
 		}
-		result += "id < ?"
+		result += "`id` < ?"
 	} else if !list.Descending && !isStartIdZero {
 		if result != "" {
 			result += " AND "
 		}
-		result += "id > ?"
+		result += "`id` > ?"
 	}
 
 	return result
@@ -116,20 +116,20 @@ func listQuery(isStartIdZero bool, entityName string, list ListConfig, columns m
 	result := ""
 	where := listWhereQuery(isStartIdZero, list, softDelete)
 
-	result = fmt.Sprintf("SELECT %s FROM %ss", querySelect(columns, softDelete), SnakeCaser(entityName))
+	result = fmt.Sprintf("SELECT %s FROM `%ss`", querySelect(columns, softDelete), SnakeCaser(entityName))
 	if where != "" {
 		result += fmt.Sprintf(" WHERE %s", where)
 	}
 
 	if strings.TrimSpace(list.Order) != "" {
-		result += fmt.Sprintf(" ORDER BY %s", list.Order)
+		result += fmt.Sprintf(" ORDER BY `%s`", SnakeCaser(list.Order))
 		if list.Descending {
-			result += " DESC, id DESC"
+			result += " DESC, `id` DESC"
 		} else {
-			result += ", id"
+			result += ", `id`"
 		}
 	} else {
-		result += " ORDER BY id"
+		result += " ORDER BY `id`"
 	}
 
 	result += " LIMIT ?"
@@ -140,7 +140,7 @@ func countQuery(entityName string, list ListConfig, columns map[string]Column, s
 	result := ""
 	where := listWhereQuery(true, list, softDelete)
 
-	result = fmt.Sprintf("SELECT count(*) FROM %ss", SnakeCaser(entityName))
+	result = fmt.Sprintf("SELECT count(*) FROM `%ss`", SnakeCaser(entityName))
 	if where != "" {
 		result += fmt.Sprintf(" WHERE %s", where)
 	}
@@ -406,33 +406,31 @@ func deleteQuery(entityName string, del DeleteConfig, columns map[string]Column,
 
 	// Soft Delete Logic
 	if softDelete && !isHardDelete {
-		result := fmt.Sprintf("UPDATE %ss SET deleted_at = NOW(), updated = NOW(), version = version + 1", SnakeCaser(entityName))
+		result := fmt.Sprintf("UPDATE `%ss` SET `deleted_at` = NOW(), `updated` = NOW(), `version` = `version` + 1", SnakeCaser(entityName))
 
 		// Scramble unique string columns to free up the unique constraint
 		uniqueCols := uniqueStringColumns(columns)
+		sort.Strings(uniqueCols) // Sort for deterministic SQL output
 		for _, col := range uniqueCols {
-			result += fmt.Sprintf(", %s = CONCAT(%s, '-del-', UUID())", col, col)
+			snakeCol := SnakeCaser(col)
+			result += fmt.Sprintf(", `%s` = CONCAT(`%s`, '-del-', UUID())", snakeCol, snakeCol)
 		}
 
 		if where != "" {
-			result += fmt.Sprintf(" WHERE (%s) AND deleted_at IS NULL", where)
+			result += fmt.Sprintf(" WHERE (%s) AND `deleted_at` IS NULL", where)
 		} else {
-			result += " WHERE deleted_at IS NULL"
+			result += " WHERE `deleted_at` IS NULL"
 		}
 
-		// Note: We removed the hardcoded limit here.
-		// It is now dynamically appended in the delete_custom.tmpl file.
 		return result
 	}
 
 	// Hard Delete Logic
-	result := fmt.Sprintf("DELETE FROM %ss", SnakeCaser(entityName))
+	result := fmt.Sprintf("DELETE FROM `%ss`", SnakeCaser(entityName))
 	if where != "" {
 		result += fmt.Sprintf(" WHERE %s", where)
 	}
 
-	// Note: We removed the hardcoded limit here.
-	// It is now dynamically appended in the delete_custom.tmpl file.
 	return result
 }
 
@@ -655,10 +653,10 @@ func listBulkQueryWhere(list ListBulkConfig, softDelete bool) string {
 		result += "(" + replaceParams(list.Where) + ") AND "
 	}
 
-	result += fmt.Sprintf("%s IN (%%s)", SnakeCaser(list.WhereIn))
+	result += fmt.Sprintf("`%s` IN (%%s)", SnakeCaser(list.WhereIn))
 
 	if softDelete {
-		result += " AND deleted_at IS NULL"
+		result += " AND `deleted_at` IS NULL"
 	}
 	return result
 }
@@ -750,7 +748,7 @@ func pluckQueryWhere(pluck PluckConfig, softDelete bool) string {
 		if result != "" {
 			result += " AND "
 		}
-		result += "deleted_at IS NULL"
+		result += "`deleted_at` IS NULL"
 	}
 	return result
 }

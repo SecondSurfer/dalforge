@@ -5,6 +5,7 @@ CREATE TABLE `users` (
     `birthdate` DATE,
     `email` VARCHAR(255) NOT NULL,
     `meta` JSON,
+    `order` TINYINT NOT NULL,
     `random_unique` VARCHAR(255) NOT NULL,
     `status` VARCHAR(255),
     `uid` VARCHAR(255) NOT NULL,

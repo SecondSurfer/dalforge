@@ -50,11 +50,7 @@ func (d *{{$entityArgumentName}}Repository) update(ctx context.Context, entity *
 
 	entity.Updated = time.Now()
 
-	query := `
-		UPDATE {{$entityTableName}}s
-		SET {{template "comma_separated_update" .}}, updated=?, version = version + 1
-		WHERE id = ? AND version = ? {{if .Root.Operations.SoftDelete}}AND deleted_at IS NULL{{end}}
-	`
+	query := "UPDATE `{{$entityTableName}}s` SET {{template "comma_separated_update" .}}, `updated` = ?, `version` = `version` + 1 WHERE `id` = ? AND `version` = ?{{if .Root.Operations.SoftDelete}} AND `deleted_at` IS NULL{{end}}"
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", true);
     if dbErr != nil {
@@ -92,7 +88,7 @@ func (d *{{$entityArgumentName}}Repository) update(ctx context.Context, entity *
 {{define "comma_separated_update"}}
 	{{- $total := len .Root.Columns -}}
 	{{- $index := 0 -}}
-	{{- range $colName, $col := .Root.Columns -}}
-		{{$colName | snakeCase}} = ?{{- $index = add $index 1 -}}{{- if lt $index $total }}, {{- end}}
+	{{- range $colName,$col := .Root.Columns -}}
+		`{{$colName | snakeCase}}` = ?{{- $index = add $index 1 -}}{{- if lt $index $total }}, {{- end}}
 	{{- end}}
 {{- end}}

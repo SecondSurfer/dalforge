@@ -48,7 +48,7 @@ func (d *{{$repoName}}) {{$delNameCamel}}(ctx context.Context{{if $funcParams}},
     dbStart := time.Now()
 
     // Inject the sanitized limit directly into the SQL string
-    query := `{{deleteQuery $entityTableName . $columns $softDelete false}}` + fmt.Sprintf(" LIMIT %d", limit)
+    query := "{{deleteQuery $entityTableName . $columns $softDelete false}}" + fmt.Sprintf(" LIMIT %d", limit)
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityTableName | camelCase}}", true)
     if dbErr != nil {
@@ -136,7 +136,7 @@ func (d *{{$repoName}}) hard{{$delNamePascal}}(ctx context.Context{{if $funcPara
     dbStart := time.Now()
 
     // Inject the sanitized limit directly into the SQL string
-    query := `{{deleteQuery $entityTableName . $columns $softDelete true}}` + fmt.Sprintf(" LIMIT %d", limit)
+    query := "{{deleteQuery $entityTableName . $columns $softDelete true}}" + fmt.Sprintf(" LIMIT %d", limit)
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityTableName | camelCase}}", true)
     if dbErr != nil {

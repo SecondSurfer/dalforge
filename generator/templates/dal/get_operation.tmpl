@@ -56,11 +56,7 @@ func (d *{{$entityArgumentName}}Repository) getBy{{.ColumnName | pascalCase}}(ct
     const operation = "get_by_{{.ColumnName | snakeCase}}"
     dbStart := time.Now()
 
-    query := `
-        SELECT {{querySelect .Root.Columns .Root.Operations.SoftDelete}}
-        FROM {{$entityTableName}}s
-        WHERE {{.ColumnName | snakeCase}} = ? {{if .Root.Operations.SoftDelete}}AND deleted_at IS NULL{{end}}
-    `
+   query := "SELECT {{querySelect .Root.Columns .Root.Operations.SoftDelete}} FROM `{{$entityTableName}}s` WHERE `{{.ColumnName | snakeCase}}` = ?{{if .Root.Operations.SoftDelete}} AND `deleted_at` IS NULL{{end}}"
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", false);
     if dbErr != nil {

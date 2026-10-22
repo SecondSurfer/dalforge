@@ -80,11 +80,7 @@ func (d *{{$entityArgumentName}}Repository) getByID(ctx context.Context, id int6
     const operation = "get_by_id"
     dbStart := time.Now();
 
-    query := `
-        SELECT {{querySelect .Columns .Operations.SoftDelete}}
-        FROM {{$entityTableName}}s
-        WHERE id = ? {{if .Operations.SoftDelete}}AND deleted_at IS NULL{{end}}
-    `
+    query := "SELECT {{querySelect .Columns .Operations.SoftDelete}} FROM `{{$entityTableName}}s` WHERE `id` = ?{{if .Operations.SoftDelete}} AND `deleted_at` IS NULL{{end}}"
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", false);
     if dbErr != nil {

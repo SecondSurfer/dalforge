@@ -69,11 +69,7 @@ func (d *{{$entityArgumentName}}Repository) {{camelCase $listBulk.Name}}(ctx con
         placeholders[i] = "?"
     }
 
-    query := fmt.Sprintf(`
-        SELECT {{querySelect .Root.Columns .Root.Operations.SoftDelete}}
-        FROM {{$entityTableName}}s
-        WHERE {{listBulkQueryWhere $listBulk .Root.Operations.SoftDelete}}
-    `, strings.Join(placeholders, ","))
+    query := fmt.Sprintf("SELECT {{querySelect .Root.Columns .Root.Operations.SoftDelete}} FROM `{{$entityTableName}}s` WHERE {{listBulkQueryWhere $listBulk .Root.Operations.SoftDelete}}", strings.Join(placeholders, ","))
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", false)
     if dbErr != nil {

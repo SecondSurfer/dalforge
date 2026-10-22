@@ -36,22 +36,9 @@ func (d *{{$entityArgumentName}}Repository) delete(ctx context.Context, id int64
 	const operation = "delete"
 
 	{{if .Root.Operations.SoftDelete}}
-	query := `
-		UPDATE {{$entityTableName}}s
-		SET 
-			deleted_at = NOW(), 
-			updated = NOW(), 
-			version = version + 1
-			{{- range $col := uniqueStringColumns .Root.Columns }}
-			, {{$col}} = CONCAT({{$col}}, '-del-', UUID())
-			{{- end }}
-		WHERE id = ? AND deleted_at IS NULL
-	`
+	query := "UPDATE `{{$entityTableName}}s` SET `deleted_at` = NOW(), `updated` = NOW(), `version` = `version` + 1{{- range $col := uniqueStringColumns .Root.Columns }}, `{{$col | snakeCase}}` = CONCAT(`{{$col | snakeCase}}`, '-del-', UUID()){{- end }} WHERE `id` = ? AND `deleted_at` IS NULL"
 	{{else}}
-	query := `
-		DELETE FROM {{$entityTableName}}s
-		WHERE id = ?
-	`
+	query := "DELETE FROM `{{$entityTableName}}s` WHERE `id` = ?"
 	{{end}}
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", true);
@@ -116,10 +103,7 @@ func (d *{{$entityArgumentName}}Repository) hardDelete(ctx context.Context, id i
 	start := time.Now()
 	const operation = "hard_delete"
 
-	query := `
-		DELETE FROM {{$entityTableName}}s
-		WHERE id = ?
-	`
+	query := "DELETE FROM `{{$entityTableName}}s` WHERE `id` = ?"
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", true);
     if dbErr != nil {

@@ -74,16 +74,7 @@ func (d *{{$entityArgumentName}}Repository) {{camelCase $upd.Name}}(ctx context.
         placeholders[i] = "?"
     }
 
-    query := fmt.Sprintf(`
-        UPDATE {{$entityTableName}}s
-        SET
-            {{- range $setCol := $upd.Set}}
-            {{$setCol | snakeCase}} = ?,
-            {{- end}}
-            updated = ?,
-            version = version + 1
-        WHERE {{$upd.WhereIn | snakeCase}} IN (%s) {{if .Root.Operations.SoftDelete}}AND deleted_at IS NULL{{end}}
-    `, strings.Join(placeholders, ","))
+    query := fmt.Sprintf("UPDATE `{{$entityTableName}}s` SET {{range $setCol :=$upd.Set}}`{{$setCol | snakeCase}}` = ?, {{end}}`updated` = ?, `version` = `version` + 1 WHERE `{{$upd.WhereIn | snakeCase}}` IN (%s){{if .Root.Operations.SoftDelete}} AND `deleted_at` IS NULL{{end}}", strings.Join(placeholders, ","))
 
     // 2. Build the flat arguments array (SET arguments first, then WHERE IN arguments)
     args := make([]interface{}, 0, {{len $upd.Set}} + 1 + len({{$inParamName}}))

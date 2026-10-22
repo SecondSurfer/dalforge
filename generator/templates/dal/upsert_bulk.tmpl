@@ -53,7 +53,7 @@ func (d *{{$entityArgumentName}}Repository) {{camelCase $upd.Name}}(ctx context.
 		d.telemetryProvider.IncDBError("{{$entityTableName}}", operation)
 		return 0, dbErr
 	}
-    
+
     if db == nil {
 		d.telemetryProvider.IncDBError("{{$entityTableName}}", operation)
 		return 0, errors.New("database connection is nil")
@@ -99,21 +99,7 @@ func (d *{{$entityArgumentName}}Repository) {{camelCase $upd.Name}}(ctx context.
 			)
 		}
 
-		query := fmt.Sprintf(`
-			INSERT INTO {{$entityTableName}}s
-			({{- template "comma_separated_columns" .Root.Columns}}created,updated)
-			VALUES %s
-			ON DUPLICATE KEY UPDATE
-			{{- range $updCol := $upd.UpdateColumns }}
-				{{- if $upd.Increment }}
-				{{$updCol | snakeCase}} = {{$entityTableName}}s.{{$updCol | snakeCase}} + VALUES({{$updCol | snakeCase}}),
-				{{- else }}
-				{{$updCol | snakeCase}} = VALUES({{$updCol | snakeCase}}),
-				{{- end }}
-			{{- end }}
-			updated = VALUES(updated),
-			version = {{$entityTableName}}s.version + 1
-		`, strings.Join(valuePlaceholders, ","))
+		query := fmt.Sprintf("INSERT INTO `{{$entityTableName}}s` ({{- template "comma_separated_columns" .Root.Columns}}`created`,`updated`) VALUES %s ON DUPLICATE KEY UPDATE {{range $updCol := $upd.UpdateColumns }}{{if $upd.Increment }}`{{$updCol | snakeCase}}` = `{{$entityTableName}}s`.`{{$updCol | snakeCase}}` + VALUES(`{{$updCol | snakeCase}}`), {{else}}`{{$updCol | snakeCase}}` = VALUES(`{{$updCol | snakeCase}}`), {{end}}{{end}}`updated` = VALUES(`updated`), `version` = `{{$entityTableName}}s`.`version` + 1", strings.Join(valuePlaceholders, ","))
 
 		res, err := db.ExecContext(ctx, query, params...)
 		if err != nil {

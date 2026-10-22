@@ -56,11 +56,7 @@ func (d *{{$entityArgumentName}}Repository) create(ctx context.Context, entity *
     {{- end }}
     {{- end }}
 
-	query := `
-		INSERT INTO {{$entityTableName}}s ({{- template "comma_separated_columns" .Root.Columns}}created,updated)
-		VALUES (
-			{{- range $index, $colName := keys .Root.Columns -}}?,{{- end }}?,?)
-	`
+	query := "INSERT INTO `{{$entityTableName}}s` ({{- template "comma_separated_columns" .Root.Columns}}`created`,`updated`) VALUES ({{- range $index, $colName := keys .Root.Columns -}}?,{{- end }}?,?)"
 
     db, dbErr := d.dbProvider.GetDatabase("{{$entityArgumentName}}", true);
     if dbErr != nil {
@@ -90,10 +86,4 @@ func (d *{{$entityArgumentName}}Repository) create(ctx context.Context, entity *
 }
 {{end}}
 
-{{define "comma_separated_columns"}}
-	{{- $total := len . -}}
-	{{- $index := 0 -}}
-	{{- range $colName, $col := . -}}
-		{{$colName | snakeCase}},
-	{{- end}}
-{{end}}
+{{define "comma_separated_columns"}}{{- range $colName, $col := . -}}`{{$colName | snakeCase}}`,{{- end}}{{end}}

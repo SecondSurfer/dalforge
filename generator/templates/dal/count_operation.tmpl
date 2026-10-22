@@ -47,7 +47,7 @@ func (d *{{$entityArgumentName}}Repository) count{{.List.Name | pascalCase}}(ctx
 	dbStart := time.Now()
 
 	// if startID is zero then query is different for pagination
-	query := `{{countQuery $entityStructName .List .Root.Columns .Root.Operations.SoftDelete}}`
+	query := "{{countQuery $entityStructName .List .Root.Columns .Root.Operations.SoftDelete}}"
 
 	db, dbErr := d.dbProvider.GetDatabase("{{$entityTableName}}", false)
 	if dbErr != nil {

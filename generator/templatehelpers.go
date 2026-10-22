@@ -423,5 +423,6 @@ func uniqueStringColumns(columns map[string]Column) []string {
 			uniqueCols = append(uniqueCols, name)
 		}
 	}
+	sort.Strings(uniqueCols)
 	return uniqueCols
 }
