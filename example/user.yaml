@@ -21,7 +21,7 @@ columns:
     type: json
     allowNull: true
   random_unique:
-    type: int8
+    type: varchar
     unique: true
 operations:
   write: true   # if true will generate proper write functions

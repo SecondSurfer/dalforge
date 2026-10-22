@@ -5,7 +5,7 @@ CREATE TABLE `users` (
     `birthdate` DATE,
     `email` VARCHAR(255) NOT NULL,
     `meta` JSON,
-    `random_unique` TINYINT NOT NULL,
+    `random_unique` VARCHAR(255) NOT NULL,
     `status` VARCHAR(255),
     `uid` VARCHAR(255) NOT NULL,
     
@@ -18,6 +18,7 @@ CREATE TABLE `users` (
 # Unique indexes as they serve Get operations returning single entity
 CREATE UNIQUE INDEX `idx_email` ON `users` (`email`);
 CREATE UNIQUE INDEX `idx_uid` ON `users` (`uid`);
+CREATE UNIQUE INDEX `idx_random_unique` ON `users` (`random_unique`);
 
 # Indexes that serve all operations
 CREATE INDEX `idx_age` ON `users` (`age`);

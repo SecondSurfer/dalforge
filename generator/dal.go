@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -176,6 +177,33 @@ func (g *Generator) parseYAML(yamlInput string) (EntityConfig, error) {
 	for colName := range config.Columns {
 		if colName == "id" || colName == "created" || colName == "updated" {
 			return EntityConfig{}, fmt.Errorf("column name '%s' is reserved", colName)
+		}
+	}
+
+	// ARCHITECTURE: Automatically register all 'unique: true' columns into Operations.Gets.
+	// This guarantees that every unique column receives:
+	// 1. A dedicated O(1) point-read fetcher (GetBy<Col>) on the Repository interface.
+	// 2. Automatic secondary cache-key invalidation if the column is mutated during Update().
+	// 3. A corresponding CREATE UNIQUE INDEX in the generated SQL schema.
+	// We sort column names first because Go map iteration is randomized, ensuring deterministic codegen.
+	var sortedUniqueCols []string
+	for colName, col := range config.Columns {
+		if col.Unique && colName != "id" {
+			sortedUniqueCols = append(sortedUniqueCols, colName)
+		}
+	}
+	sort.Strings(sortedUniqueCols)
+
+	for _, uniqueCol := range sortedUniqueCols {
+		alreadyInGets := false
+		for _, getCol := range config.Operations.Gets {
+			if getCol == uniqueCol {
+				alreadyInGets = true
+				break
+			}
+		}
+		if !alreadyInGets {
+			config.Operations.Gets = append(config.Operations.Gets, uniqueCol)
 		}
 	}
 

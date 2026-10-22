@@ -105,6 +105,17 @@ func validateColumns(columns map[string]Column) []string {
 				errs = append(errs, fmt.Sprintf("prefix '%s' for column '%s' must be in snake_case", col.Prefix, colName))
 			}
 		}
+
+		// Enforce that 'unique: true' is only allowed on non-nullable 'varchar' or 'uid' columns
+		// (excluding the built-in 'id' column used in unit tests).
+		if col.Unique && colName != "id" {
+			if col.Type != "varchar" && col.Type != "uid" {
+				errs = append(errs, fmt.Sprintf("column '%s' of type '%s' cannot be marked as unique; only 'varchar' and 'uid' types support unique constraints", colName, col.Type))
+			}
+			if col.AllowNull {
+				errs = append(errs, fmt.Sprintf("unique column '%s' cannot have allowNull: true", colName))
+			}
+		}
 	}
 	return errs
 }

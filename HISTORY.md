@@ -2,6 +2,9 @@
 
 ## v1.5.7 - 2026-10-21
   - fix: adding backticks to sql column names
+  - fix: rediscacheprovider, refactored to not use time.Sleep(2); unit tests will work now
+  - new: all unique: true columns will be auto added to gets section. 
+
 
 ## v1.5.6 - 2026-10-05
   - change: output will now be <entity>.gen.go file for interface definitions and <entity>_impl.gen.go for implementations

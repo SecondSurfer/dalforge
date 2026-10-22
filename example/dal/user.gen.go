@@ -29,7 +29,7 @@ type User struct {
     Birthdate *time.Time `json:"birthdate"`
     Email string `json:"email"`
     Meta *json.RawMessage `json:"meta"`
-    RandomUnique int8 `json:"random_unique"`
+    RandomUnique string `json:"random_unique"`
     Status *string `json:"status"`
     Uid string `json:"uid"`
 
@@ -68,6 +68,7 @@ type UserRepository interface {
     HardDelete(ctx context.Context, entity *User) error
     GetByEmail(ctx context.Context, email string) (*User, error)
     GetByUid(ctx context.Context, uid string) (*User, error)
+    GetByRandomUnique(ctx context.Context, randomUnique string) (*User, error)
     // GetByUids executes a bulk get operation.
     //
     // PERFORMANCE & CACHING NOTE:

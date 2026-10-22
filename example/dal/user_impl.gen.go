@@ -479,6 +479,11 @@ func (d *userRepository) Update(ctx context.Context, entity *User) error {
 		oldUid = existing.Uid
 	}
 		
+	var oldRandomUnique string
+	if existing.RandomUnique != entity.RandomUnique {
+		oldRandomUnique = existing.RandomUnique
+	}
+		
 
 	// Perform the update in DB.
 	_, err2 := d.dbBreaker.Execute(func() (interface{}, error) {
@@ -497,6 +502,11 @@ func (d *userRepository) Update(ctx context.Context, entity *User) error {
 	}
 	if oldUid != "" {
 		oldCacheKey := fmt.Sprintf("user_uid:%s", oldUid)
+		d.cache.Delete(oldCacheKey)
+		d.cacheProvider.InvalidateCache("user", oldCacheKey)
+	}
+	if oldRandomUnique != "" {
+		oldCacheKey := fmt.Sprintf("user_random_unique:%s", oldRandomUnique)
 		d.cache.Delete(oldCacheKey)
 		d.cacheProvider.InvalidateCache("user", oldCacheKey)
 	}
@@ -598,6 +608,7 @@ func (d *userRepository) delete(ctx context.Context, id int64) error {
 			version = version + 1
 			, uid = CONCAT(uid, '-del-', UUID())
 			, email = CONCAT(email, '-del-', UUID())
+			, random_unique = CONCAT(random_unique, '-del-', UUID())
 		WHERE id = ? AND deleted_at IS NULL
 	`
 	
@@ -997,6 +1008,102 @@ func (d *userRepository) getByUid(ctx context.Context, uid string) (*User, error
 
         d.telemetryProvider.IncDBError("user", operation)
         return nil, fmt.Errorf("failed to get User by Uid: %w", err)
+    }
+
+    d.telemetryProvider.IncDBRequest("user", operation)	
+    d.telemetryProvider.ObserveDBLatency("user", operation, time.Since(dbStart).Seconds())	
+    return &entity, nil
+}
+
+
+
+func (d *userRepository) GetByRandomUnique(ctx context.Context, randomUnique string) (*User, error) {
+    if d.configProvider.BlockedReads("user") {
+        return nil, ErrOperationBlocked
+    }
+
+    const operation = "get_by_random_unique"
+    d.telemetryProvider.IncDALOperation("user", operation)
+
+    // key would for example be: user_email:test@something.com, but in this case cache is only mapping email -> id
+    cacheKey := fmt.Sprintf("user_random_unique:%v", randomUnique)
+
+    // Fetch from cache RandomUnique -> ID mapping
+    val, found := d.cache.Get(cacheKey)
+    if found {
+        entityId, ok := val.(int64)
+        if !ok {
+            return nil, fmt.Errorf("userRepository.GetByRandomUnique: Cache returned wrong type; expected ID type")
+        }
+
+        d.telemetryProvider.IncCacheHit("user", operation)        
+        
+        // return entity by that id
+        return d.GetByID(ctx, entityId)
+    }
+
+    // Cache missed or error during fetching cached data
+    d.telemetryProvider.IncCacheMiss("user", operation)        	
+
+	// Fallback to database if cache miss or decoding fails
+	result, err := d.dbBreaker.Execute(func() (interface{}, error) {
+		return d.getByRandomUnique(ctx, randomUnique)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	entity := result.(*User)
+
+    // Warm up the primary entity cache
+	d.setCached(entity)
+
+	// Store in cache RandomUnique -> ID mapping
+    d.telemetryProvider.IncCacheWrite("user")    
+    d.cache.Set(cacheKey, entity.ID, time.Second*300)
+
+    return entity, err
+}
+
+func (d *userRepository) getByRandomUnique(ctx context.Context, randomUnique string) (*User, error) {
+    const operation = "get_by_random_unique"
+    dbStart := time.Now()
+
+    query := `
+        SELECT id, version, age, birthdate, email, meta, random_unique, status, uid, created, updated, deleted_at
+        FROM users
+        WHERE random_unique = ? AND deleted_at IS NULL
+    `
+
+    db, dbErr := d.dbProvider.GetDatabase("user", false);
+    if dbErr != nil {
+        d.telemetryProvider.IncDBError("user", operation)
+        return nil, dbErr
+    }
+
+    row := db.QueryRowContext(ctx, query, randomUnique)
+    var entity User
+    err := row.Scan(
+        &entity.ID,
+        &entity.Version,
+        &entity.Age,
+        &entity.Birthdate,
+        &entity.Email,
+        &entity.Meta,
+        &entity.RandomUnique,
+        &entity.Status,
+        &entity.Uid,
+        &entity.Created,
+        &entity.Updated,
+        &entity.DeletedAt,
+    )
+    if err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            return nil, ErrNotFound
+        }
+
+        d.telemetryProvider.IncDBError("user", operation)
+        return nil, fmt.Errorf("failed to get User by RandomUnique: %w", err)
     }
 
     d.telemetryProvider.IncDBRequest("user", operation)	
@@ -2665,7 +2772,7 @@ func (d *userRepository) deleteOlder(ctx context.Context, age int8, limit int) (
     dbStart := time.Now()
 
     // Inject the sanitized limit directly into the SQL string
-    query := `UPDATE users SET deleted_at = NOW(), updated = NOW(), version = version + 1, uid = CONCAT(uid, '-del-', UUID()), email = CONCAT(email, '-del-', UUID()) WHERE (age > ?) AND deleted_at IS NULL` + fmt.Sprintf(" LIMIT %d", limit)
+    query := `UPDATE users SET deleted_at = NOW(), updated = NOW(), version = version + 1, email = CONCAT(email, '-del-', UUID()), random_unique = CONCAT(random_unique, '-del-', UUID()), uid = CONCAT(uid, '-del-', UUID()) WHERE (age > ?) AND deleted_at IS NULL` + fmt.Sprintf(" LIMIT %d", limit)
 
     db, dbErr := d.dbProvider.GetDatabase("user", true)
     if dbErr != nil {
