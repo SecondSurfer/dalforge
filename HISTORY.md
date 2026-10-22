@@ -4,6 +4,7 @@
   - fix: adding backticks to sql column names
   - fix: rediscacheprovider, refactored to not use time.Sleep(2); unit tests will work now
   - new: all unique: true columns will be auto added to gets section. 
+  - fix: improved index creation. remove excessive index (age) and (age, created) for example
 
 
 ## v1.5.6 - 2026-10-05

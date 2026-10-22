@@ -91,7 +91,7 @@ func TestValidateEntityConfig_Valid(t *testing.T) {
 			Type:                    "memory",
 			SingleExpirationSeconds: 60,
 			ListExpirationSeconds:   60,
-			ListInvalidation:        "expire", // FIX: Reverted to 'expire' to pass existing validator logic
+			ListInvalidation:        "expire",
 			MaxItemsCount:           20,
 		},
 	}
@@ -107,14 +107,16 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 		Name:    "User", // not snake_case
 		Version: "",     // empty version (error)
 		Columns: map[string]Column{
-			"id":             {Type: "int64", AllowNull: false, Unique: true},
-			"email":          {Type: "varchar", AllowNull: false, Unique: false},                   // error: used in gets but not unique
-			"firstName":      {Type: "varchar", AllowNull: false, Unique: false},                   // error: not snake_case
-			"invalid":        {Type: "unknown", AllowNull: false, Unique: false},                   // error: unsupported type
-			"legacy_uuid":    {Type: "uuid", AllowNull: false, Unique: false},                      // error: uuid is no longer supported
-			"missing_prefix": {Type: "uid", Prefix: "", AllowNull: false, Unique: true},            // error: uid requires a prefix when unique
-			"bad_prefix":     {Type: "uid", Prefix: "User Prefix", AllowNull: false, Unique: true}, // error: prefix must be snake_case when unique
-			"score":          {Type: "int32", AllowNull: false, Unique: false},
+			"id":              {Type: "int64", AllowNull: false, Unique: true},
+			"email":           {Type: "varchar", AllowNull: false, Unique: false},                   // error: used in gets but not unique
+			"firstName":       {Type: "varchar", AllowNull: false, Unique: false},                   // error: not snake_case
+			"invalid":         {Type: "unknown", AllowNull: false, Unique: false},                   // error: unsupported type
+			"legacy_uuid":     {Type: "uuid", AllowNull: false, Unique: false},                      // error: uuid is no longer supported
+			"missing_prefix":  {Type: "uid", Prefix: "", AllowNull: false, Unique: true},            // error: uid requires a prefix when unique
+			"bad_prefix":      {Type: "uid", Prefix: "User Prefix", AllowNull: false, Unique: true}, // error: prefix must be snake_case when unique
+			"unique_int":      {Type: "int8", AllowNull: false, Unique: true},                       // error: non-string column cannot be unique
+			"nullable_unique": {Type: "varchar", AllowNull: true, Unique: true},                     // error: unique column cannot allowNull
+			"score":           {Type: "int32", AllowNull: false, Unique: false},
 		},
 		Operations: OperationConfig{
 			Gets: []string{"id", "email", "non_existent"}, // non_existent: error; email: error due to not unique.
@@ -174,7 +176,7 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 				},
 				{
 					Name:    "list_by_unique_column",
-					WhereIn: "id", // id is unique but we also define a custom unique below
+					WhereIn: "id", // id is unique
 				},
 			},
 			Plucks: []PluckConfig{
@@ -255,6 +257,8 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 		"column 'legacy_uuid' has unsupported type 'uuid'",
 		"column 'missing_prefix' of type 'uid' requires a non-empty 'prefix'",
 		"prefix 'User Prefix' for column 'bad_prefix' must be in snake_case",
+		"column 'unique_int' of type 'int8' cannot be marked as unique; only 'varchar' and 'uid' types support unique constraints",
+		"unique column 'nullable_unique' cannot have allowNull: true",
 		"get operation refers to unknown column 'non_existent'",
 		"get operation requires column 'email' to be unique",
 		"list name 'lst' must be longer than 4 characters",
@@ -295,5 +299,82 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 		if !strings.Contains(errStr, expectedError) {
 			t.Errorf("Expected error message to contain: %q\nGot: %q", expectedError, errStr)
 		}
+	}
+}
+
+func TestParseYAML_AutoInjectsUniqueGetsAndOptimizesIndexes(t *testing.T) {
+	yamlInput := `
+name: couple_invite
+version: v1
+columns:
+  uid:
+    type: uid
+    prefix: inv
+    unique: true
+  invite_code:
+    type: varchar
+    unique: true
+    allowNull: false
+  age:
+    type: int8
+operations:
+  write: true
+  delete: true
+  gets:
+    - uid
+  lists:
+    - name: list_by_age
+      where: age = :age
+      order: created
+  deletes:
+    - name: delete_by_age
+      where: age > :age
+circuitbreaker:
+  timeoutSeconds: 20
+  consecutiveFailures: 4
+caching:
+  type: memory
+  singleExpirationSeconds: 300
+  listExpirationSeconds: 60
+  listInvalidation: epoch
+  maxItemsCount: 1000
+`
+
+	gen, err := NewGenerator()
+	if err != nil {
+		t.Fatalf("Failed to initialize generator: %v", err)
+	}
+
+	contractCode, implCode, _, err := gen.GenerateDAL(yamlInput)
+	if err != nil {
+		t.Fatalf("GenerateDAL failed: %v", err)
+	}
+
+	// 1. Verify 'invite_code' was auto-injected into Operations.Gets
+	if !strings.Contains(contractCode, "GetByInviteCode(ctx context.Context, inviteCode string)") {
+		t.Errorf("Expected contractCode to contain auto-generated GetByInviteCode method")
+	}
+
+	// 2. Verify secondary cache invalidation uses the entity's actual table name ('couple_invite_invite_code')
+	if !strings.Contains(implCode, `fmt.Sprintf("couple_invite_invite_code:%s", oldInviteCode)`) {
+		t.Errorf("Expected implCode to invalidate 'couple_invite_invite_code:%%s' on update")
+	}
+
+	sqlCode, err := gen.GenerateSQL(yamlInput)
+	if err != nil {
+		t.Fatalf("GenerateSQL failed: %v", err)
+	}
+
+	// 3. Verify unique index was created for both 'uid' and 'invite_code'
+	if !strings.Contains(sqlCode, "CREATE UNIQUE INDEX `idx_invite_code` ON `couple_invites` (`invite_code`);") {
+		t.Errorf("Expected sqlCode to contain unique index for auto-injected invite_code, got:\n%s", sqlCode)
+	}
+
+	// 4. Verify left-prefix index pruning: idx_age_created should exist, while redundant idx_age is dropped
+	if !strings.Contains(sqlCode, "CREATE INDEX `idx_age_created` ON `couple_invites` (`age`, `created`);") {
+		t.Errorf("Expected sqlCode to contain composite index idx_age_created")
+	}
+	if strings.Contains(sqlCode, "CREATE INDEX `idx_age` ON `couple_invites` (`age`);") {
+		t.Errorf("Expected redundant left-prefix index idx_age to be pruned, got:\n%s", sqlCode)
 	}
 }

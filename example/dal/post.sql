@@ -4,7 +4,7 @@ CREATE TABLE `posts` (
     `deleted` BOOLEAN NOT NULL,
     `expires_at` DATETIME NOT NULL,
     `language_id` VARCHAR(255) NOT NULL,
-    `post` text NOT NULL,
+    `post` TEXT NOT NULL,
     `revoked` BOOLEAN NOT NULL,
     `story_uid` VARCHAR(255) NOT NULL,
     `target_age` TINYINT NOT NULL,

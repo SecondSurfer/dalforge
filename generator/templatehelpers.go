@@ -140,7 +140,7 @@ func toSQLType(yamlType string) string {
 	case "varchar":
 		return "VARCHAR(255)" // Default length for strings
 	case "text":
-		return "text" // Default length for strings
+		return "TEXT" // Default length for strings
 	case "bool":
 		return "BOOLEAN"
 	case "date":
@@ -209,11 +209,15 @@ func extractIndexColumns(where string, order string, columns map[string]Column) 
 	var cols []string
 	seen := make(map[string]bool)
 
+	//ARCHITECTURE: Strip named parameters (e.g., :cutoff) before scanning words
+	// so parameter names are never mistaken for table columns.
+	cleanWhere := replaceParams(where)
+
 	// Regex to match whole words (potential column names)
 	re := regexp.MustCompile(`\b[a-zA-Z_][a-zA-Z0-9_]*\b`)
 
 	// 1. Extract from WHERE clause
-	whereWords := re.FindAllString(where, -1)
+	whereWords := re.FindAllString(cleanWhere, -1)
 	for _, w := range whereWords {
 		isBuiltIn := w == "id" || w == "created" || w == "updated" || w == "deleted_at"
 		_, isCustom := columns[w]
@@ -239,36 +243,37 @@ func extractIndexColumns(where string, order string, columns map[string]Column) 
 	return cols
 }
 
-// Replace the existing listSQLIndexes function in generator/templatehelpers.go
-func listSQLIndexes(tableName string, columns map[string]Column, lists []ListConfig, listsBulk []ListBulkConfig, plucks []PluckConfig, deletes []DeleteConfig) string {
-	// Use a map to deduplicate identical composite indexes across different operations
-	indexMap := make(map[string]string)
+func listSQLIndexes(
+	tableName string,
+	columns map[string]Column,
+	lists []ListConfig,
+	listsBulk []ListBulkConfig,
+	updatesBulk []UpdateBulkConfig,
+	plucks []PluckConfig,
+	deletes []DeleteConfig,
+) string {
+	var candidateCols [][]string
 
-	addIndex := func(cols []string) {
+	addCandidate := func(cols []string) {
 		if len(cols) == 0 {
 			return
 		}
-
-		// Create a unique signature for this column combination
-		colSignature := strings.Join(cols, "_")
-
-		// Truncate signature if it exceeds MySQL's 64 character index name limit
-		idxName := fmt.Sprintf("idx_%s", colSignature)
-		if len(idxName) > 64 {
-			idxName = idxName[:64]
+		// ARCHITECTURE: Skip single-column indexes on 'id' (covered by PRIMARY KEY)
+		// or columns marked 'unique: true' (already covered by CREATE UNIQUE INDEX).
+		if len(cols) == 1 {
+			if cols[0] == "id" {
+				return
+			}
+			if col, ok := columns[cols[0]]; ok && col.Unique {
+				return
+			}
 		}
-
-		quotedCols := make([]string, len(cols))
-		for i, col := range cols {
-			quotedCols[i] = fmt.Sprintf("`%s`", SnakeCaser(col))
-		}
-		colStr := strings.Join(quotedCols, ", ")
-		indexMap[colSignature] = fmt.Sprintf("CREATE INDEX `%s` ON `%ss` (%s);\n", idxName, SnakeCaser(tableName), colStr)
+		candidateCols = append(candidateCols, cols)
 	}
 
 	// 1. Process Standard Lists
 	for _, list := range lists {
-		addIndex(extractIndexColumns(list.Where, list.Order, columns))
+		addCandidate(extractIndexColumns(list.Where, list.Order, columns))
 	}
 
 	// 2. Process Bulk Lists
@@ -277,21 +282,66 @@ func listSQLIndexes(tableName string, columns map[string]Column, lists []ListCon
 		if listBulk.WhereIn != "" && listBulk.WhereIn != "id" && !slices.Contains(cols, listBulk.WhereIn) {
 			cols = append(cols, listBulk.WhereIn)
 		}
-		addIndex(cols)
+		addCandidate(cols)
 	}
 
-	// 3. Process Plucks (Covering Indexes)
+	// 3. Process Bulk Updates (Ensure WHERE IN column is indexed to avoid full-table locking)
+	for _, updBulk := range updatesBulk {
+		if updBulk.WhereIn != "" && updBulk.WhereIn != "id" {
+			addCandidate([]string{updBulk.WhereIn})
+		}
+	}
+
+	// 4. Process Plucks (Covering Indexes)
 	for _, pluck := range plucks {
 		cols := extractIndexColumns(pluck.Where, "", columns)
 		if pluck.Column != "id" && !slices.Contains(cols, pluck.Column) {
 			cols = append(cols, pluck.Column)
 		}
-		addIndex(cols)
+		addCandidate(cols)
 	}
 
-	// 4. Process Deletes
+	// 5. Process Deletes
 	for _, del := range deletes {
-		addIndex(extractIndexColumns(del.Where, "", columns))
+		addCandidate(extractIndexColumns(del.Where, "", columns))
+	}
+
+	// Prune duplicates and redundant left-prefix indexes (e.g., drop [age] if [age, created] exists)
+	indexMap := make(map[string]string)
+	for i, colsA := range candidateCols {
+		isRedundantPrefix := false
+		for j, colsB := range candidateCols {
+			if i == j || len(colsA) > len(colsB) {
+				continue
+			}
+			// If identical length and same elements, only keep the first occurrence
+			if len(colsA) == len(colsB) && slices.Equal(colsA, colsB) && i > j {
+				isRedundantPrefix = true
+				break
+			}
+			// If colsA is a strict left-prefix of colsB (e.g., [age] is covered by [age, created])
+			if len(colsA) < len(colsB) && slices.Equal(colsA, colsB[:len(colsA)]) {
+				isRedundantPrefix = true
+				break
+			}
+		}
+
+		if isRedundantPrefix {
+			continue
+		}
+
+		colSignature := strings.Join(colsA, "_")
+		idxName := fmt.Sprintf("idx_%s", colSignature)
+		if len(idxName) > 64 {
+			idxName = idxName[:64]
+		}
+
+		quotedCols := make([]string, len(colsA))
+		for k, col := range colsA {
+			quotedCols[k] = fmt.Sprintf("`%s`", SnakeCaser(col))
+		}
+		colStr := strings.Join(quotedCols, ", ")
+		indexMap[colSignature] = fmt.Sprintf("CREATE INDEX `%s` ON `%ss` (%s);\n", idxName, SnakeCaser(tableName), colStr)
 	}
 
 	// Sort the map keys to ensure deterministic SQL generation output
@@ -319,6 +369,9 @@ func listSQLIndexes(tableName string, columns map[string]Column, lists []ListCon
 func checkColumnsChanged(config EntityConfig) string {
 	result := ""
 	for _, colName := range config.Operations.Gets {
+		if colName == "id" {
+			continue
+		}
 		col := config.Columns[colName]
 		result += fmt.Sprintf(`
 	var old%s %s
@@ -334,14 +387,18 @@ func checkColumnsChanged(config EntityConfig) string {
 
 func invalidateUniqueColumnsCache(config EntityConfig) string {
 	result := ""
+	entityTableName := SnakeCaser(config.Name)
 
 	for _, colName := range config.Operations.Gets {
+		if colName == "id" {
+			continue
+		}
 		result += fmt.Sprintf(`
 	if old%s != "" {
-		oldCacheKey := fmt.Sprintf("user_%s:%%s", old%s)
+		oldCacheKey := fmt.Sprintf("%s_%s:%%s", old%s)
 		d.cache.Delete(oldCacheKey)
 		d.cacheProvider.InvalidateCache("%s", oldCacheKey)
-	}`, PascalCaser(colName), SnakeCaser(colName), PascalCaser(colName), SnakeCaser(config.Name))
+	}`, PascalCaser(colName), entityTableName, SnakeCaser(colName), PascalCaser(colName), entityTableName)
 	}
 
 	return result

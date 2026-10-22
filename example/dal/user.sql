@@ -21,7 +21,6 @@ CREATE UNIQUE INDEX `idx_uid` ON `users` (`uid`);
 CREATE UNIQUE INDEX `idx_random_unique` ON `users` (`random_unique`);
 
 # Indexes that serve all operations
-CREATE INDEX `idx_age` ON `users` (`age`);
 CREATE INDEX `idx_age_created` ON `users` (`age`, `created`);
 CREATE INDEX `idx_birthdate` ON `users` (`birthdate`);
 CREATE INDEX `idx_status_created` ON `users` (`status`, `created`);
