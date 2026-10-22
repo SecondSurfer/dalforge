@@ -135,12 +135,40 @@ func (m *Migrator) Run(ctx context.Context) error {
 		return err
 	}
 
-	if strings.Contains(diffOutput, "Nothing is modified") || strings.TrimSpace(diffOutput) == "" {
+	// Architectural Why: mysqldef emits "-- Skipped: DROP TABLE ..." comments when
+	// tables from other services (like 'signups') exist in the shared database and
+	// --skip-drop is active. We must separate actual executable DDL from SQL comments
+	// so we don't prompt the operator to apply a no-op migration.
+	var executableLines []string
+	var skippedLines []string
+	for _, line := range strings.Split(diffOutput, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed == "-- dry run --" || strings.Contains(trimmed, "Nothing is modified") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "-- Skipped:") {
+			skippedLines = append(skippedLines, trimmed)
+			continue
+		}
+		if strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		executableLines = append(executableLines, line)
+	}
+
+	if len(skippedLines) > 0 {
+		fmt.Fprintf(m.out, "\nℹ️  Ignored/Skipped Statements (%d):\n", len(skippedLines))
+		for _, s := range skippedLines {
+			fmt.Fprintf(m.out, "   %s\n", s)
+		}
+	}
+
+	if len(executableLines) == 0 {
 		fmt.Fprintf(m.out, "\n✅ Database schema on [%s] is 100%% in sync with release [%s]!\n", envUpper, m.cfg.Version)
 		return nil
 	}
 
-	cleanPlan := strings.TrimSpace(strings.ReplaceAll(diffOutput, "-- dry run --", ""))
+	cleanPlan := strings.TrimSpace(strings.Join(executableLines, "\n"))
 
 	fmt.Fprintf(m.out, "\n📋 Proposed DDL Changes for [%s] (Release %s):\n", envUpper, m.cfg.Version)
 	fmt.Fprintln(m.out, "--------------------------------------------------------------------------------")

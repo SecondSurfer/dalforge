@@ -174,4 +174,29 @@ func TestMigrator_Run(t *testing.T) {
 			t.Fatalf("expected Error 1170 to propagate, got: %v", err)
 		}
 	})
+
+	t.Run("OnlySkippedComments_DoesNotPromptOrApply", func(t *testing.T) {
+		exec := &fakeSchemaExecutor{
+			dryRunOutput: "-- dry run --\n-- Skipped: DROP TABLE `signups`;\n",
+		}
+		var out bytes.Buffer
+		m := NewMigrator(mockFS, exec, MigrationConfig{
+			EnvName: "dev",
+			Version: "v1.0.0",
+		}, strings.NewReader(""), &out)
+
+		err := m.Run(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if exec.applied {
+			t.Errorf("expected apply not to be called when only '-- Skipped:' comments are present")
+		}
+		if !strings.Contains(out.String(), "100% in sync") {
+			t.Errorf("expected output to confirm 100%% in sync, got: %s", out.String())
+		}
+		if strings.Contains(out.String(), "WARNING: Destructive") {
+			t.Errorf("expected no destructive warning for skipped statements, got: %s", out.String())
+		}
+	})
 }
