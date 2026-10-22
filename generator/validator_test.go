@@ -14,6 +14,7 @@ func TestValidateEntityConfig_Valid(t *testing.T) {
 			"public_id":   {Type: "uid", Prefix: "user", AllowNull: false, Unique: true},
 			"email":       {Type: "varchar", AllowNull: false, Unique: true},
 			"preferences": {Type: "json", AllowNull: true, Unique: false},
+			"raw_bio":     {Type: "text", AllowNull: true, Unique: false}, // Valid as long as it is not indexed
 			"status":      {Type: "varchar", AllowNull: false, Unique: false},
 			"score":       {Type: "int32", AllowNull: false, Unique: false}, // Valid column for buffer
 			"created":     {Type: "datetime", AllowNull: false, Unique: false},
@@ -117,6 +118,8 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 			"unique_int":      {Type: "int8", AllowNull: false, Unique: true},                       // error: non-string column cannot be unique
 			"nullable_unique": {Type: "varchar", AllowNull: true, Unique: true},                     // error: unique column cannot allowNull
 			"score":           {Type: "int32", AllowNull: false, Unique: false},
+			"raw_receipt":     {Type: "text", AllowNull: false, Unique: false}, // error when used in indexed operations
+			"meta_data":       {Type: "json", AllowNull: true, Unique: false},  // error when used in indexed operations
 		},
 		Operations: OperationConfig{
 			Gets: []string{"id", "email", "non_existent"}, // non_existent: error; email: error due to not unique.
@@ -147,6 +150,11 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 						"badParam": "ghost_column", // error: mapping to a column that doesn't exist
 					},
 				},
+				{
+					Name:  "list_by_receipt",
+					Where: "raw_receipt = :raw_receipt", // error: indexing TEXT column in list
+					Order: "created",
+				},
 			},
 			Deletes: []DeleteConfig{
 				{
@@ -157,6 +165,10 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 					TypeMapping: map[string]string{
 						"badParam": "ghost_column", // error: ghost_column doesn't exist
 					},
+				},
+				{
+					Name:  "delete_by_meta",
+					Where: "meta_data = :meta_data", // error: indexing JSON column in delete
 				},
 			},
 			Write:  true,
@@ -177,6 +189,17 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 				{
 					Name:    "list_by_unique_column",
 					WhereIn: "id", // id is unique
+				},
+				{
+					Name:    "list_bulk_by_receipt",
+					WhereIn: "raw_receipt", // error: indexing TEXT column in listsBulk
+				},
+			},
+			UpdatesBulk: []UpdateBulkConfig{
+				{
+					Name:    "update_by_receipts",
+					Set:     []string{"score"},
+					WhereIn: "raw_receipt", // error: indexing TEXT column in updatesBulk
 				},
 			},
 			Plucks: []PluckConfig{
@@ -204,6 +227,11 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 					TypeMapping: map[string]string{
 						"badParam": "ghost_column", // error: mapped column doesn't exist
 					},
+				},
+				{
+					Name:   "pluck_receipts",
+					Column: "raw_receipt", // error: covering index includes TEXT column
+					Where:  "email = :email",
 				},
 			},
 			UpsertsBulk: []UpsertBulkConfig{
@@ -293,6 +321,11 @@ func TestValidateEntityConfig_Invalid(t *testing.T) {
 		"bufferedCounter 'inc' flushIntervalSeconds must be at least 10 seconds to prevent Redis CPU spikes",
 		"bufferedCounter 'inc' requires entity listInvalidation to be 'expire' or 'none', currently 'epoch'",
 		"bufferedCounter 'missing_upsert' targeting column 'score' requires a corresponding 'upsertsBulk' operation with 'increment: true' and 'score' in 'updateColumns'",
+		"list 'list_by_receipt' indexes column 'raw_receipt' of type 'text'; MySQL cannot index TEXT/JSON columns without a key length (use 'varchar' instead)",
+		"listsBulk 'list_bulk_by_receipt' indexes column 'raw_receipt' of type 'text'; MySQL cannot index TEXT/JSON columns without a key length (use 'varchar' instead)",
+		"updatesBulk 'update_by_receipts' indexes column 'raw_receipt' of type 'text'; MySQL cannot index TEXT/JSON columns without a key length (use 'varchar' instead)",
+		"pluck 'pluck_receipts' indexes column 'raw_receipt' of type 'text'; MySQL cannot index TEXT/JSON columns without a key length (use 'varchar' instead)",
+		"delete 'delete_by_meta' indexes column 'meta_data' of type 'json'; MySQL cannot index TEXT/JSON columns without a key length (use 'varchar' instead)",
 	}
 
 	for _, expectedError := range expectedErrors {

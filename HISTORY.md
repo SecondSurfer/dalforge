@@ -1,13 +1,13 @@
 # Version History
 
-## v1.5.7 - 2026-10-21
+## v1.5.7 - 2026-10-22
   - fix: adding backticks to sql column names
   - fix: rediscacheprovider, refactored to not use time.Sleep(2); unit tests will work now
   - new: all unique: true columns will be auto added to gets section. 
   - fix: improved index creation. remove excessive index (age) and (age, created) for example
   - fix: adding backticks to queries ran by go code. to allow columns like order for example
+  - fix: checking that text and json column types cannot be used in lists, etc.
   - new: added migrator code for sql dbs
-
 
 ## v1.5.6 - 2026-10-05
   - change: output will now be <entity>.gen.go file for interface definitions and <entity>_impl.gen.go for implementations

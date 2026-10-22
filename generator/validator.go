@@ -211,6 +211,8 @@ func validateOperationConfig(ops OperationConfig, columns map[string]Column, ent
 
 	errs = append(errs, validateUpsertsBulk(ops.UpsertsBulk, columns)...)
 
+	errs = append(errs, validateIndexedColumns(ops, columns)...)
+
 	return errs
 }
 
@@ -556,6 +558,53 @@ func validateBufferedCounters(counters []BufferedCounterConfig, upserts []Upsert
 		if !hasMatchingUpsert {
 			errs = append(errs, fmt.Sprintf("bufferedCounter '%s' targeting column '%s' requires a corresponding 'upsertsBulk' operation with 'increment: true' and '%s' in 'updateColumns'", bc.Name, bc.Column, bc.Column))
 		}
+	}
+
+	return errs
+}
+
+// validateIndexedColumns ensures no 'text' or 'json' columns are used in operations
+// that auto-generate MySQL B-Tree indexes (Error 1170).
+func validateIndexedColumns(ops OperationConfig, columns map[string]Column) []string {
+	var errs []string
+
+	checkCols := func(opType, opName string, colNames []string) {
+		for _, colName := range colNames {
+			if col, exists := columns[colName]; exists {
+				if col.Type == "text" || col.Type == "json" {
+					errs = append(errs, fmt.Sprintf(
+						"%s '%s' indexes column '%s' of type '%s'; MySQL cannot index TEXT/JSON columns without a key length (use 'varchar' instead)",
+						opType, opName, colName, col.Type,
+					))
+				}
+			}
+		}
+	}
+
+	for _, l := range ops.Lists {
+		checkCols("list", l.Name, extractIndexColumns(l.Where, l.Order, columns))
+	}
+	for _, lb := range ops.ListsBulk {
+		cols := extractIndexColumns(lb.Where, "", columns)
+		if lb.WhereIn != "" {
+			cols = append(cols, lb.WhereIn)
+		}
+		checkCols("listsBulk", lb.Name, cols)
+	}
+	for _, ub := range ops.UpdatesBulk {
+		if ub.WhereIn != "" {
+			checkCols("updatesBulk", ub.Name, []string{ub.WhereIn})
+		}
+	}
+	for _, p := range ops.Plucks {
+		cols := extractIndexColumns(p.Where, "", columns)
+		if p.Column != "" {
+			cols = append(cols, p.Column)
+		}
+		checkCols("pluck", p.Name, cols)
+	}
+	for _, d := range ops.Deletes {
+		checkCols("delete", d.Name, extractIndexColumns(d.Where, "", columns))
 	}
 
 	return errs

@@ -3,6 +3,7 @@ package dal
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -133,6 +134,44 @@ func TestMigrator_Run(t *testing.T) {
 		err := m.Run(context.Background())
 		if err != ErrNoSQLFiles {
 			t.Errorf("expected ErrNoSQLFiles, got: %v", err)
+		}
+	})
+
+	t.Run("CancelledContext_DoesNotApply", func(t *testing.T) {
+		exec := &fakeSchemaExecutor{
+			dryRunOutput: "-- dry run --\nALTER TABLE `users` ADD COLUMN `age` TINYINT;",
+		}
+		var out bytes.Buffer
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Simulate SIGINT/SIGTERM before apply step
+
+		m := NewMigrator(mockFS, exec, MigrationConfig{
+			EnvName: "dev",
+			Version: "v1.0.0",
+		}, strings.NewReader("yes\n"), &out)
+
+		err := m.Run(ctx)
+		if err == nil {
+			t.Fatalf("expected error on cancelled context, got nil")
+		}
+		if exec.applied {
+			t.Errorf("expected apply not to be called when context is cancelled")
+		}
+	})
+
+	t.Run("ExecutorError_PropagatesCleanly", func(t *testing.T) {
+		exec := &fakeSchemaExecutor{
+			err: errors.New("Error 1170 (42000): BLOB/TEXT column used in key specification"),
+		}
+		var out bytes.Buffer
+		m := NewMigrator(mockFS, exec, MigrationConfig{
+			EnvName: "dev",
+			Version: "v1.0.0",
+		}, strings.NewReader("yes\n"), &out)
+
+		err := m.Run(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "Error 1170") {
+			t.Fatalf("expected Error 1170 to propagate, got: %v", err)
 		}
 	})
 }
