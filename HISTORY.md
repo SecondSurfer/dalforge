@@ -6,6 +6,7 @@
   - new: all unique: true columns will be auto added to gets section. 
   - fix: improved index creation. remove excessive index (age) and (age, created) for example
   - fix: adding backticks to queries ran by go code. to allow columns like order for example
+  - new: added migrator code for sql dbs
 
 
 ## v1.5.6 - 2026-10-05

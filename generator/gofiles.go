@@ -48,6 +48,10 @@ func (g *Generator) CopyOtherFiles(outputDir string) error {
 			return nil
 		}
 
+		// Strip ".static" suffix when copying files that shouldn't be compiled inside templates/dal
+		// (e.g., schema_embed.gen.go.static -> schema_embed.gen.go)
+		outPath = strings.TrimSuffix(outPath, ".static")
+
 		if getFileNameWithoutExt(d.Name()) == "serverprovider" || getFileNameWithoutExt(d.Name()) == "db_config.example" {
 			if _, statErr := os.Stat(outPath); statErr == nil {
 				// The file exists, so do not overwrite
