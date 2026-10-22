@@ -10,13 +10,14 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// TestRedisCacheProvider spins up a Redis container and tests the provider.
+// TestRedisCacheProvider spins up an isolated Redis container and verifies both
+// the L2 Pub/Sub invalidation channels and the Write-Behind Hash buffer operations.
 func TestRedisCacheProvider(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a Redis container.
 	req := testcontainers.ContainerRequest{
-		Image:        "redis:7-alpine", // Use an official Redis image.
+		Image:        "redis:7-alpine",
 		ExposedPorts: []string{"6379/tcp"},
 		WaitingFor:   wait.ForListeningPort("6379/tcp"),
 	}
@@ -47,7 +48,7 @@ func TestRedisCacheProvider(t *testing.T) {
 	addr := fmt.Sprintf("%s:%s", host, port.Port())
 	t.Logf("Address of redis is: %s", addr)
 
-	// Initialize the provider.
+	// Initialize the provider via constructor injection (passing nil uses NoopTelemetryProvider).
 	provider := NewRedisCacheProvider(addr, "", 0, nil)
 	if err := provider.Connect(); err != nil {
 		t.Fatalf("failed to connect to redis: %v", err)
@@ -56,8 +57,9 @@ func TestRedisCacheProvider(t *testing.T) {
 	t.Logf("Connected to redis: %s", addr)
 
 	t.Run("PubSub Operations", func(t *testing.T) {
-		// Test OnCacheInvalidated by registering a handler.
-		// We'll use a channel to capture the handler invocation.
+		// 1. Single-Key Cache Invalidation
+		// ARCHITECTURE: Because OnCacheInvalidated synchronously awaits the Redis SUBSCRIBE
+		// handshake before returning, we can immediately publish without race conditions or sleeps.
 		resultCh := make(chan string, 1)
 		provider.OnCacheInvalidated("test", func(key string) {
 			resultCh <- key
@@ -68,57 +70,80 @@ func TestRedisCacheProvider(t *testing.T) {
 			resultCh2 <- key
 		})
 
-		// Test that InvalidateCache returns immediately with no error.
 		if err := provider.InvalidateCache("test", "key1"); err != nil {
-			t.Errorf("InvalidateCache returned error: %v", err)
+			t.Fatalf("InvalidateCache returned error: %v", err)
 		}
-		// Test that InvalidateCache returns immediately with no error.
 		if err := provider.InvalidateCache("test2", "key2"); err != nil {
-			t.Errorf("InvalidateCache returned error: %v", err)
+			t.Fatalf("InvalidateCache returned error: %v", err)
 		}
 
-		// Wait for the handler to be invoked.
+		// Wait for both handlers to be invoked.
 		receivedCount := 0
-	loop:
-		for {
+		timeout := time.After(5 * time.Second)
+		for receivedCount < 2 {
 			select {
 			case received := <-resultCh:
 				if received != "key1" {
 					t.Errorf("expected 'key1', got '%s'", received)
 				}
 				receivedCount++
-				if receivedCount == 2 {
-					break loop
-				}
 			case received := <-resultCh2:
 				if received != "key2" {
 					t.Errorf("expected 'key2', got '%s'", received)
 				}
 				receivedCount++
-				if receivedCount == 2 {
-					break loop
-				}
-			case <-time.After(5 * time.Second):
-				t.Error("timeout waiting for cache invalidation handler")
+			case <-timeout:
+				// Use t.Fatal so the test aborts immediately instead of looping until the 30s runner panic.
+				t.Fatal("timeout waiting for cache invalidation handler")
 			}
 		}
 
-		// Just test FlushList
-		flushResultCh := make(chan string, 1)
+		// 2. FlushListCache
+		flushListCh := make(chan struct{}, 1)
 		provider.OnCacheFlushList("test", func() {
-			flushResultCh <- "Test"
+			flushListCh <- struct{}{}
 		})
 		if err := provider.FlushListCache("test"); err != nil {
-			t.Errorf("FlushListCache returned error: %v", err)
+			t.Fatalf("FlushListCache returned error: %v", err)
 		}
 
 		select {
-		case received := <-flushResultCh:
-			if received != "Test" {
-				t.Errorf("expected 'Test', got '%s'", received)
-			}
+		case <-flushListCh:
+			// Success
 		case <-time.After(5 * time.Second):
-			t.Error("timeout waiting for cache invalidation handler")
+			t.Fatal("timeout waiting for cache flush list handler")
+		}
+
+		// 3. FlushItemCache (used during bulk updates/upserts/deletes)
+		flushItemCh := make(chan struct{}, 1)
+		provider.OnCacheFlushItem("test", func() {
+			flushItemCh <- struct{}{}
+		})
+		if err := provider.FlushItemCache("test"); err != nil {
+			t.Fatalf("FlushItemCache returned error: %v", err)
+		}
+
+		select {
+		case <-flushItemCh:
+			// Success
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for cache flush item handler")
+		}
+
+		// 4. BumpEpoch (used for O(1) list cache invalidation across horizontal pods)
+		bumpEpochCh := make(chan struct{}, 1)
+		provider.OnBumpEpoch("test", func() {
+			bumpEpochCh <- struct{}{}
+		})
+		if err := provider.BumpEpoch("test"); err != nil {
+			t.Fatalf("BumpEpoch returned error: %v", err)
+		}
+
+		select {
+		case <-bumpEpochCh:
+			// Success
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for bump epoch handler")
 		}
 	})
 
@@ -126,7 +151,7 @@ func TestRedisCacheProvider(t *testing.T) {
 		testHashKey := "test:buffer:counts"
 		testField := "match_xyz"
 
-		// 1. Test HIncrBy (Creates the hash and increments)
+		// 1. Test HIncrBy (Creates the hash and atomically increments)
 		if err := provider.HIncrBy(ctx, testHashKey, testField, 5); err != nil {
 			t.Fatalf("HIncrBy failed: %v", err)
 		}
@@ -147,7 +172,7 @@ func TestRedisCacheProvider(t *testing.T) {
 			t.Errorf("HScan returned unexpected results: %v", results)
 		}
 
-		// 3. Test Rename
+		// 3. Test Rename (Used by Flusher to isolate the active buffer snapshot)
 		newHashKey := "test:buffer:processing"
 		if err := provider.Rename(ctx, testHashKey, newHashKey); err != nil {
 			t.Fatalf("Rename failed: %v", err)
@@ -162,7 +187,7 @@ func TestRedisCacheProvider(t *testing.T) {
 			t.Errorf("Expected old hash key to be empty after rename")
 		}
 
-		// 4. Test SetNX (Locking mechanism)
+		// 4. Test SetNX (Distributed locking mechanism for multi-pod flushers)
 		lockKey := "test:flush_lock"
 		acquired, err := provider.SetNX(ctx, lockKey, "locked", 10*time.Second)
 		if err != nil {
@@ -172,7 +197,7 @@ func TestRedisCacheProvider(t *testing.T) {
 			t.Errorf("Failed to acquire initial SetNX lock")
 		}
 
-		// Second attempt should fail to acquire
+		// Second attempt should fail to acquire while lock is held
 		acquired2, err := provider.SetNX(ctx, lockKey, "locked", 10*time.Second)
 		if err != nil {
 			t.Fatalf("Second SetNX failed: %v", err)
@@ -193,6 +218,24 @@ func TestRedisCacheProvider(t *testing.T) {
 		}
 		if !acquired3 {
 			t.Errorf("Expected to acquire lock after deletion")
+		}
+	})
+
+	t.Run("Close Guardrails", func(t *testing.T) {
+		provider.Close()
+
+		// Publishing after Close() should immediately return an error without spawning goroutines.
+		if err := provider.InvalidateCache("test", "key1"); err == nil {
+			t.Errorf("expected error when calling InvalidateCache on closed provider, got nil")
+		}
+		if err := provider.FlushListCache("test"); err == nil {
+			t.Errorf("expected error when calling FlushListCache on closed provider, got nil")
+		}
+		if err := provider.FlushItemCache("test"); err == nil {
+			t.Errorf("expected error when calling FlushItemCache on closed provider, got nil")
+		}
+		if err := provider.BumpEpoch("test"); err == nil {
+			t.Errorf("expected error when calling BumpEpoch on closed provider, got nil")
 		}
 	})
 }
