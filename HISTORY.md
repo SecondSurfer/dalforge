@@ -1,5 +1,8 @@
 # Version History
 
+## v1.5.8 - 2026-10-28
+  - fix: -enable-drop flag. related change on migrator for mysqldef@3.9.x versions
+
 ## v1.5.7 - 2026-10-22
   - fix: adding backticks to sql column names
   - fix: rediscacheprovider, refactored to not use time.Sleep(2); unit tests will work now

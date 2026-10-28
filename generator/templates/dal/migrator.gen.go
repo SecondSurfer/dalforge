@@ -18,7 +18,8 @@ import (
 
 // Domain errors for the schema migration tool.
 var (
-	ErrMysqldefNotFound = errors.New("mysqldef binary not found in PATH (run: go install github.com/sqldef/sqldef/cmd/mysqldef@latest)")
+	// SRE FIX: Pin the recommended sqldef version in the error hint to match services/bigapi/Dockerfile
+	ErrMysqldefNotFound = errors.New("mysqldef binary not found in PATH (run: go install github.com/sqldef/sqldef/cmd/mysqldef@v3.9.4)")
 	ErrNoSQLFiles       = errors.New("no embedded .sql files found in schema filesystem")
 )
 
@@ -71,8 +72,11 @@ func (e *MysqldefCLIExecutor) Execute(ctx context.Context, desiredSQL string, dr
 	if dryRun {
 		args = append(args, "--dry-run")
 	}
-	if e.cfg.SkipDrop {
-		args = append(args, "--skip-drop")
+	// Architectural Why: In sqldef/mysqldef v2 and v3+, safe additive mode (skipping
+	// destructive DROP statements) is the default behavior, and the legacy '--skip-drop'
+	// flag was removed. To allow drops when SkipDrop is false, we must pass '--enable-drop'.
+	if !e.cfg.SkipDrop {
+		args = append(args, "--enable-drop")
 	}
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
@@ -137,8 +141,8 @@ func (m *Migrator) Run(ctx context.Context) error {
 
 	// Architectural Why: mysqldef emits "-- Skipped: DROP TABLE ..." comments when
 	// tables from other services (like 'signups') exist in the shared database and
-	// --skip-drop is active. We must separate actual executable DDL from SQL comments
-	// so we don't prompt the operator to apply a no-op migration.
+	// safe additive mode (SkipDrop) is active. We must separate actual executable DDL
+	// from SQL comments so we don't prompt the operator to apply a no-op migration.
 	var executableLines []string
 	var skippedLines []string
 	for _, line := range strings.Split(diffOutput, "\n") {
@@ -177,7 +181,7 @@ func (m *Migrator) Run(ctx context.Context) error {
 
 	if strings.Contains(strings.ToUpper(cleanPlan), "DROP ") {
 		fmt.Fprintln(m.out, "\n⚠️  WARNING: Destructive (DROP) statements detected in the plan above!")
-		fmt.Fprintln(m.out, "   To run only additive changes (CREATE/ADD), pass -skip-drop.")
+		fmt.Fprintln(m.out, "   To run only additive changes (CREATE/ADD), pass -skip-drop=true.")
 	}
 
 	// 2. Interactive review & approval gate
