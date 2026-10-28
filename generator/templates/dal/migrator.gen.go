@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,13 +17,30 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
+// Domain errors for the schema and data migration tool.
 var (
 	// SRE FIX: Include /v3 in module path for Go Semantic Import Versioning
 	ErrMysqldefNotFound = errors.New("mysqldef binary not found in PATH (run: go install github.com/sqldef/sqldef/v3/cmd/mysqldef@v3.11.28)")
 	ErrNoSQLFiles       = errors.New("no embedded .sql files found in schema filesystem")
 )
+
+// schemaMigrationsDDL defines the ledger table used by Phase 2 imperative SQL data migrations.
+// Architectural Why: Because DALForge natively manages both declarative schema (Phase 1) and
+// versioned SQL data migrations (Phase 2), embedding this table definition into Phase 1's
+// desiredSQL stream ensures mysqldef never proposes dropping the ledger during --enable-drop runs.
+const schemaMigrationsDDL = `-- Source: _dalforge_schema_migrations.sql
+CREATE TABLE schema_migrations (
+    version VARCHAR(255) NOT NULL PRIMARY KEY,
+    checksum VARCHAR(64) NOT NULL,
+    applied_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    execution_ms BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+`
 
 // MigrationConfig holds pure database target configuration values injected into the Migrator.
 // Architectural Why: Keeps the migration engine completely ignorant of how network
@@ -35,6 +55,9 @@ type MigrationConfig struct {
 	Password string
 	Database string
 	SkipDrop bool
+	SkipSQL  bool
+	// DataMigrationsDir is the subdirectory inside dataFS containing versioned *.sql files (default: "migrations").
+	DataMigrationsDir string
 }
 
 // SchemaExecutor abstracts the underlying DDL diff/execution engine.
@@ -94,9 +117,24 @@ func (e *MysqldefCLIExecutor) Execute(ctx context.Context, desiredSQL string, dr
 	return outBuf.String(), nil
 }
 
-// Migrator coordinates loading the embedded schema, previewing the diff, and applying changes.
+type appliedDataMigration struct {
+	Version     string
+	Checksum    string
+	AppliedAt   time.Time
+	ExecutionMs int64
+}
+
+type pendingDataMigration struct {
+	Version  string
+	Checksum string
+	SQL      string
+}
+
+// Migrator coordinates Phase 1 (declarative schema via mysqldef) and Phase 2 (imperative
+// versioned SQL data migrations tracked in schema_migrations).
 type Migrator struct {
 	schemaFS fs.FS
+	dataFS   fs.FS
 	executor SchemaExecutor
 	cfg      MigrationConfig
 	in       io.Reader
@@ -104,9 +142,13 @@ type Migrator struct {
 }
 
 // NewMigrator enforces constructor injection for all dependencies.
+// Note: To adds Phase 2 SQL data migrations, chain .WithDataMigrations(dataFS) or use NewMigratorWithData.
 func NewMigrator(schemaFS fs.FS, executor SchemaExecutor, cfg MigrationConfig, in io.Reader, out io.Writer) *Migrator {
 	if cfg.AppName == "" {
-		cfg.AppName = "DALForge Schema Migrator"
+		cfg.AppName = "DALForge Schema & Data Migrator"
+	}
+	if cfg.DataMigrationsDir == "" {
+		cfg.DataMigrationsDir = "migrations"
 	}
 	return &Migrator{
 		schemaFS: schemaFS,
@@ -117,7 +159,16 @@ func NewMigrator(schemaFS fs.FS, executor SchemaExecutor, cfg MigrationConfig, i
 	}
 }
 
-// Run executes the dry-run diff, prompts for interactive confirmation, and applies the migration.
+// WithDataMigrations attaches an optional fs.FS containing imperative versioned *.sql scripts
+// for Phase 2 execution. Keeping this as a fluent builder method preserves 100% backward
+// compatibility with existing NewMigrator callers and unit tests.
+func (m *Migrator) WithDataMigrations(dataFS fs.FS) *Migrator {
+	m.dataFS = dataFS
+	return m
+}
+
+// Run executes the Phase 1 (DDL) & Phase 2 (Data SQL) dry-run diff, prompts for a single
+// interactive confirmation, and applies both phases in sequence.
 func (m *Migrator) Run(ctx context.Context) error {
 	desiredSQL, count, err := m.loadEmbeddedSQL()
 	if err != nil {
@@ -128,11 +179,13 @@ func (m *Migrator) Run(ctx context.Context) error {
 	fmt.Fprintln(m.out, "================================================================================")
 	fmt.Fprintf(m.out, "🐝 %s | Release Version: %s\n", m.cfg.AppName, m.cfg.Version)
 	fmt.Fprintf(m.out, "🌍 Environment : %s\n", envUpper)
-	fmt.Fprintf(m.out, "📦 Embedded SQL: %d table definitions locked in binary\n", count)
+	fmt.Fprintf(m.out, "📦 Embedded SQL: %d table definitions locked in binary (+ schema_migrations)\n", count)
 	fmt.Fprintf(m.out, "🗄️  Target MySQL: %s@%s:%d/%s\n", m.cfg.User, m.cfg.Host, m.cfg.Port, m.cfg.Database)
 	fmt.Fprintln(m.out, "================================================================================")
 
-	// 1. Dry-run to compute diff
+	// -------------------------------------------------------------------------
+	// PHASE 1 DRY-RUN: Declarative Schema Diff via mysqldef
+	// -------------------------------------------------------------------------
 	diffOutput, err := m.executor.Execute(ctx, desiredSQL, true)
 	if err != nil {
 		return err
@@ -140,8 +193,8 @@ func (m *Migrator) Run(ctx context.Context) error {
 
 	// Architectural Why: mysqldef emits "-- Skipped: DROP TABLE ..." comments when
 	// tables from other services (like 'signups') exist in the shared database and
-	// safe additive mode (SkipDrop) is active. We must separate actual executable DDL
-	// from SQL comments so we don't prompt the operator to apply a no-op migration.
+	// safe additive mode (SkipDrop) is active. We separate executable DDL from SQL comments
+	// so we don't prompt the operator to apply a no-op migration.
 	var executableLines []string
 	var skippedLines []string
 	for _, line := range strings.Split(diffOutput, "\n") {
@@ -166,37 +219,63 @@ func (m *Migrator) Run(ctx context.Context) error {
 		}
 	}
 
-	if len(executableLines) == 0 {
-		fmt.Fprintf(m.out, "\n✅ Database schema on [%s] is 100%% in sync with release [%s]!\n", envUpper, m.cfg.Version)
+	hasSchemaChanges := len(executableLines) > 0
+	cleanPlan := strings.TrimSpace(strings.Join(executableLines, "\n"))
+
+	if !hasSchemaChanges {
+		fmt.Fprintf(m.out, "\n✅ Phase 1: Database DDL schema on [%s] is 100%% in sync with release [%s]!\n", envUpper, m.cfg.Version)
+	} else {
+		fmt.Fprintf(m.out, "\n📋 Phase 1: Proposed DDL Changes for [%s] (Release %s):\n", envUpper, m.cfg.Version)
+		fmt.Fprintln(m.out, "--------------------------------------------------------------------------------")
+		fmt.Fprintln(m.out, cleanPlan)
+		fmt.Fprintln(m.out, "--------------------------------------------------------------------------------")
+
+		if strings.Contains(strings.ToUpper(cleanPlan), "DROP ") {
+			fmt.Fprintln(m.out, "\n⚠️  WARNING: Destructive (DROP) statements detected in the plan above!")
+			fmt.Fprintln(m.out, "   To run only additive changes (CREATE/ADD), pass -skip-drop=true.")
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// PHASE 2 DRY-RUN: Versioned Imperative SQL Data Migrations
+	// -------------------------------------------------------------------------
+	var pendingData []pendingDataMigration
+	var db *sql.DB
+
+	if m.dataFS != nil && !m.cfg.SkipSQL {
+		var err error
+		db, pendingData, err = m.prepareDataMigrations(ctx, envUpper)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+	}
+
+	hasDataChanges := len(pendingData) > 0
+
+	// If neither Phase 1 nor Phase 2 has pending changes, exit cleanly without prompting.
+	if !hasSchemaChanges && !hasDataChanges {
 		return nil
 	}
 
-	cleanPlan := strings.TrimSpace(strings.Join(executableLines, "\n"))
-
-	fmt.Fprintf(m.out, "\n📋 Proposed DDL Changes for [%s] (Release %s):\n", envUpper, m.cfg.Version)
-	fmt.Fprintln(m.out, "--------------------------------------------------------------------------------")
-	fmt.Fprintln(m.out, cleanPlan)
-	fmt.Fprintln(m.out, "--------------------------------------------------------------------------------")
-
-	if strings.Contains(strings.ToUpper(cleanPlan), "DROP ") {
-		fmt.Fprintln(m.out, "\n⚠️  WARNING: Destructive (DROP) statements detected in the plan above!")
-		fmt.Fprintln(m.out, "   To run only additive changes (CREATE/ADD), pass -skip-drop=true.")
-	}
-
-	// 2. Interactive review & approval gate
+	// -------------------------------------------------------------------------
+	// UNIFIED INTERACTIVE REVIEW & APPROVAL GATE
+	// -------------------------------------------------------------------------
 	expectedConfirm := "yes"
-	prompt := fmt.Sprintf("\n🚀 Type 'yes' to apply these changes to [%s]: ", envUpper)
+	prompt := fmt.Sprintf("\n🚀 Type 'yes' to apply pending migration(s) to [%s]: ", envUpper)
 	if envUpper == "PROD" {
 		expectedConfirm = "apply-prod"
-		prompt = "\n🚨 PRODUCTION WARNING: Type 'apply-prod' to execute these changes on PROD: "
+		prompt = "\n🚨 PRODUCTION WARNING: Type 'apply-prod' to execute pending migration(s) on PROD: "
 	}
 
 	fmt.Fprint(m.out, prompt)
 	reader := bufio.NewReader(m.in)
 	line, err := reader.ReadString('\n')
 	if err != nil {
+		// Architectural Why: In Ansible's Dry-Run task (`< /dev/null`), stdin immediately
+		// returns io.EOF. Returning nil here lets the dry-run task succeed and print the preview.
 		if errors.Is(err, io.EOF) && strings.TrimSpace(line) == "" {
-			fmt.Fprintln(m.out, "\nℹ️  Dry-run mode detected (EOF). No DDL schema changes were applied.")
+			fmt.Fprintln(m.out, "\nℹ️  Dry-run mode detected (EOF). No changes were applied.")
 			return nil
 		}
 		return fmt.Errorf("reading confirmation input: %w", err)
@@ -211,23 +290,208 @@ func (m *Migrator) Run(ctx context.Context) error {
 		return fmt.Errorf("migration cancelled: %w", err)
 	}
 
-	// 3. Apply changes
-	fmt.Fprintf(m.out, "\n⚡ Applying schema migrations to [%s]...\n", envUpper)
-	applyOutput, err := m.executor.Execute(ctx, desiredSQL, false)
-	if err != nil {
-		return err
+	// -------------------------------------------------------------------------
+	// APPLY PHASE 1: Declarative Schema Changes
+	// -------------------------------------------------------------------------
+	if hasSchemaChanges {
+		fmt.Fprintf(m.out, "\n⚡ Applying Phase 1 DDL schema migrations to [%s]...\n", envUpper)
+		applyOutput, err := m.executor.Execute(ctx, desiredSQL, false)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(applyOutput) != "" {
+			fmt.Fprintln(m.out, strings.TrimSpace(applyOutput))
+		}
+		fmt.Fprintf(m.out, "✅ Phase 1 DDL schema migration for release [%s] successfully applied to [%s]!\n", m.cfg.Version, envUpper)
 	}
-	if strings.TrimSpace(applyOutput) != "" {
-		fmt.Fprintln(m.out, strings.TrimSpace(applyOutput))
+
+	// -------------------------------------------------------------------------
+	// APPLY PHASE 2: Imperative SQL Data Migrations
+	// -------------------------------------------------------------------------
+	if hasDataChanges && db != nil {
+		if err := m.applyDataMigrations(ctx, db, pendingData); err != nil {
+			return err
+		}
 	}
-	fmt.Fprintf(m.out, "✅ Migration for release [%s] successfully applied to [%s]!\n", m.cfg.Version, envUpper)
 
 	return nil
 }
 
-// loadEmbeddedSQL reads all *.sql files from the injected fs.FS and strips '#' comments.
-// Architectural Why: dalforge templates use '#' for section comments inside .sql files.
-// Stripping them here keeps the DDL stream clean for downstream parsers like mysqldef.
+// prepareDataMigrations connects to MySQL, ensures the schema_migrations ledger exists,
+// verifies SHA-256 checksums of already-applied scripts, and returns pending migrations.
+func (m *Migrator) prepareDataMigrations(ctx context.Context, envUpper string) (*sql.DB, []pendingDataMigration, error) {
+	fmt.Fprintf(m.out, "\n================================================================================\n")
+	fmt.Fprintf(m.out, "📜 Phase 2: Versioned SQL Data Migrations (%s)\n", envUpper)
+	fmt.Fprintf(m.out, "================================================================================\n")
+
+	mysqlCfg := mysql.NewConfig()
+	mysqlCfg.User = m.cfg.User
+	mysqlCfg.Passwd = m.cfg.Password
+	mysqlCfg.Net = "tcp"
+	mysqlCfg.Addr = fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
+	mysqlCfg.DBName = m.cfg.Database
+	mysqlCfg.ParseTime = true
+	mysqlCfg.MultiStatements = true
+
+	db, err := sql.Open("mysql", mysqlCfg.FormatDSN())
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open mysql connection for data migrations: %w", err)
+	}
+
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("failed to ping mysql for data migrations: %w", err)
+	}
+
+	const createLedgerSQL = `
+	CREATE TABLE IF NOT EXISTS schema_migrations (
+		version VARCHAR(255) NOT NULL PRIMARY KEY,
+		checksum VARCHAR(64) NOT NULL,
+		applied_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+		execution_ms BIGINT NOT NULL
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`
+
+	if _, err := db.ExecContext(ctx, createLedgerSQL); err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("failed to ensure schema_migrations table exists: %w", err)
+	}
+
+	applied, err := m.fetchAppliedDataMigrations(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+
+	entries, err := fs.ReadDir(m.dataFS, m.cfg.DataMigrationsDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(m.out, "✅ No SQL data migration directory (%s) found.\n", m.cfg.DataMigrationsDir)
+			return db, nil, nil
+		}
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("failed to read embedded migrations directory %q: %w", m.cfg.DataMigrationsDir, err)
+	}
+
+	var filenames []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			filenames = append(filenames, entry.Name())
+		}
+	}
+	sort.Strings(filenames)
+
+	if len(filenames) == 0 {
+		fmt.Fprintf(m.out, "✅ No SQL data migration files found.\n")
+		return db, nil, nil
+	}
+
+	var pending []pendingDataMigration
+	for _, name := range filenames {
+		rawBytes, readErr := fs.ReadFile(m.dataFS, m.cfg.DataMigrationsDir+"/"+name)
+		if readErr != nil {
+			_ = db.Close()
+			return nil, nil, fmt.Errorf("failed to read embedded migration %s: %w", name, readErr)
+		}
+
+		sqlContent := strings.TrimSpace(string(rawBytes))
+		if sqlContent == "" {
+			continue
+		}
+
+		hash := sha256.Sum256(rawBytes)
+		checksum := hex.EncodeToString(hash[:])
+
+		if prev, exists := applied[name]; exists {
+			if prev.Checksum != checksum {
+				_ = db.Close()
+				return nil, nil, fmt.Errorf(
+					"🚨 CHECKSUM DRIFT DETECTED for already-applied migration %q!\n   Recorded in DB : %s\n   Current File   : %s\n   Refusing to proceed. Never modify an already-applied migration file",
+					name, prev.Checksum, checksum,
+				)
+			}
+			fmt.Fprintf(m.out, "⏭️  [SKIPPED] %s (applied %s, %dms)\n",
+				name, prev.AppliedAt.Format("2006-01-02 15:04:05"), prev.ExecutionMs)
+			continue
+		}
+
+		pending = append(pending, pendingDataMigration{
+			Version:  name,
+			Checksum: checksum,
+			SQL:      sqlContent,
+		})
+	}
+
+	if len(pending) == 0 {
+		fmt.Fprintf(m.out, "\n✅ Phase 2: All SQL data migrations are 100%% in sync!\n")
+		return db, nil, nil
+	}
+
+	fmt.Fprintf(m.out, "\n📋 PENDING_SQL_DATA_MIGRATIONS: Found %d pending SQL data migration(s):\n", len(pending))
+	for i, p := range pending {
+		fmt.Fprintf(m.out, "\n--- [%d/%d] %s (sha256: %s) ---\n%s\n",
+			i+1, len(pending), p.Version, p.Checksum[:12], p.SQL)
+	}
+
+	return db, pending, nil
+}
+
+// applyDataMigrations executes each pending SQL data migration inside an atomic transaction
+// and records its checksum and duration in the schema_migrations ledger.
+func (m *Migrator) applyDataMigrations(ctx context.Context, db *sql.DB, pending []pendingDataMigration) error {
+	fmt.Fprintf(m.out, "\n⚡ Applying Phase 2 SQL data migrations (%d pending)...\n", len(pending))
+
+	for _, p := range pending {
+		fmt.Fprintf(m.out, "🚀 Applying %s...\n", p.Version)
+		start := time.Now()
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for %s: %w", p.Version, err)
+		}
+
+		if _, execErr := tx.ExecContext(ctx, p.SQL); execErr != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed executing migration %s: %w", p.Version, execErr)
+		}
+
+		execMs := time.Since(start).Milliseconds()
+		const insertSQL = `INSERT INTO schema_migrations (version, checksum, execution_ms) VALUES (?, ?, ?)`
+		if _, logErr := tx.ExecContext(ctx, insertSQL, p.Version, p.Checksum, execMs); logErr != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed recording migration %s in schema_migrations: %w", p.Version, logErr)
+		}
+
+		if commitErr := tx.Commit(); commitErr != nil {
+			return fmt.Errorf("failed committing transaction for %s: %w", p.Version, commitErr)
+		}
+
+		fmt.Fprintf(m.out, "✅ Applied %s (%dms)\n", p.Version, execMs)
+	}
+
+	fmt.Fprintf(m.out, "\n🎉 All pending Phase 2 SQL data migrations applied successfully!\n")
+	return nil
+}
+
+func (m *Migrator) fetchAppliedDataMigrations(ctx context.Context, db *sql.DB) (map[string]appliedDataMigration, error) {
+	rows, err := db.QueryContext(ctx, `SELECT version, checksum, applied_at, execution_ms FROM schema_migrations`)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying schema_migrations ledger: %w", err)
+	}
+	defer rows.Close()
+
+	applied := make(map[string]appliedDataMigration)
+	for rows.Next() {
+		var am appliedDataMigration
+		if err := rows.Scan(&am.Version, &am.Checksum, &am.AppliedAt, &am.ExecutionMs); err != nil {
+			return nil, fmt.Errorf("failed scanning schema_migrations row: %w", err)
+		}
+		applied[am.Version] = am
+	}
+	return applied, rows.Err()
+}
+
+// loadEmbeddedSQL reads all *.sql files from the injected fs.FS, strips '#' comments,
+// and appends the native DALForge schema_migrations ledger table definition.
 func (m *Migrator) loadEmbeddedSQL() (string, int, error) {
 	files, err := fs.Glob(m.schemaFS, "*.sql")
 	if err != nil {
@@ -256,6 +520,9 @@ func (m *Migrator) loadEmbeddedSQL() (string, int, error) {
 		}
 		b.WriteString("\n")
 	}
+
+	// Include the DALForge schema_migrations ledger table in the declarative stream
+	b.WriteString(schemaMigrationsDDL)
 
 	return b.String(), len(files), nil
 }
