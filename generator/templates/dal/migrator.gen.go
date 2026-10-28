@@ -16,10 +16,9 @@ import (
 	"strings"
 )
 
-// Domain errors for the schema migration tool.
 var (
-	// SRE FIX: Pin the recommended sqldef version in the error hint to match services/bigapi/Dockerfile
-	ErrMysqldefNotFound = errors.New("mysqldef binary not found in PATH (run: go install github.com/sqldef/sqldef/cmd/mysqldef@v3.9.4)")
+	// SRE FIX: Include /v3 in module path for Go Semantic Import Versioning
+	ErrMysqldefNotFound = errors.New("mysqldef binary not found in PATH (run: go install github.com/sqldef/sqldef/v3/cmd/mysqldef@v3.11.28)")
 	ErrNoSQLFiles       = errors.New("no embedded .sql files found in schema filesystem")
 )
 
