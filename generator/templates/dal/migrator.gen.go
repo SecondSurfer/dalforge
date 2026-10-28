@@ -194,7 +194,11 @@ func (m *Migrator) Run(ctx context.Context) error {
 	fmt.Fprint(m.out, prompt)
 	reader := bufio.NewReader(m.in)
 	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
+		if errors.Is(err, io.EOF) && strings.TrimSpace(line) == "" {
+			fmt.Fprintln(m.out, "\nℹ️  Dry-run mode detected (EOF). No DDL schema changes were applied.")
+			return nil
+		}
 		return fmt.Errorf("reading confirmation input: %w", err)
 	}
 
